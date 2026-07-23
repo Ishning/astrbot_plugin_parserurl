@@ -167,6 +167,7 @@ class ParserItem(ConfigNode):
     sub_uids_users: list[str] | None
     only_previewCard: bool | None
     ignore_lottery: bool | None
+    ignore_lottery_content: list[str] | None
 
     #控制预览卡片是否显示详细信息
     show_preview_detail: bool | None
