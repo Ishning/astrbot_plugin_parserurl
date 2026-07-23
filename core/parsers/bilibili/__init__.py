@@ -69,6 +69,7 @@ class BilibiliParser(BaseParser):
         self.platform_botid = getattr(self.mycfg, "platform_botid", None) or []
         self.only_previewCard = getattr(self.mycfg, "only_previewCard", None) or False
         self.ignore_lottery = getattr(self.mycfg, "ignore_lottery", None) or False
+        self.ignore_lottery_content = getattr(self.mycfg, "ignore_lottery_content", None) or ["恭喜", "中奖", "私信", "奖品", "抽奖"]
 
         self.uid_name_cache = {}
 
@@ -1444,7 +1445,8 @@ class BilibiliParser(BaseParser):
         if not text:
             return False
 
-        keywords = ["恭喜", "中奖", "私信", "奖品", "抽奖"]
+        # keywords = ["恭喜", "中奖", "私信", "奖品", "抽奖"]
+        keywords = self.ignore_lottery_content
         hits = sum(1 for k in keywords if k in text)
 
         if hits >= 3:
