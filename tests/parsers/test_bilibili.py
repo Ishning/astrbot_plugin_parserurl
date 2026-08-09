@@ -43,6 +43,7 @@ def mock_config(tmp_path):
     bili_cfg.platform_botid = []
     bili_cfg.only_previewCard = False
     bili_cfg.ignore_lottery = False
+    bili_cfg.ignore_lottery_content = ["恭喜", "中奖", "私信", "奖品", "抽奖"]
     bili_cfg.sub_uids_users = ["114514-g666"] # 模拟一个订阅配置
     bili_cfg.use_proxy = False
     
@@ -73,6 +74,9 @@ def test_codec_priority_list(bili_parser):
 @pytest.mark.asyncio
 async def test_is_lottery_logic(bili_parser):
     """测试抽奖动态过滤逻辑"""
+    # _is_lottery 使用解析器从用户配置读取的关键词，这里直接覆盖测试逻辑
+    bili_parser.ignore_lottery_content = ["关注", "转发", "中奖"]
+
     assert await bili_parser._is_lottery("关注并转发，恭喜你中奖啦，快来私信领奖品") == True
     assert await bili_parser._is_lottery("先辈，给大家发个昏睡红茶座位小礼物") == False
 
