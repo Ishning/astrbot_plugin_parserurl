@@ -158,7 +158,7 @@ class ParserItem(ConfigNode):
     video_codecs_list: list[str] | None
     video_quality: str | None
 
-    #bilibili订阅相关，后续有其他可以再添加
+    # 平台订阅相关（目前由 B站、抖音解析器使用）
     sub_enable: bool | None
     sub_interval: int | None
     sub_delay: int | None
