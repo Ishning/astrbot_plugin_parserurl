@@ -2,6 +2,7 @@
 
 import asyncio
 import re
+from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import filter
@@ -18,7 +19,7 @@ from .core.clean import CacheCleaner
 from .core.config import PluginConfig
 from .core.debounce import Debouncer
 from .core.download import Downloader
-from .core.parsers import BaseParser, BilibiliParser
+from .core.parsers import BaseParser, BilibiliParser, DouyinParser
 from .core.render import Renderer
 from .core.sender import MessageSender
 from .core.utils import extract_json_url
@@ -419,6 +420,138 @@ class ParserPlugin(Star):
         except Exception as e:
             logger.exception(f"[bili_订阅] 查询详细订阅失败: {e}")
             yield event.plain_result(f"查询错误: {e}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("订阅抖音用户")
+    async def subscribe_douyin_user(self, event: AstrMessageEvent, user_value: str = ""):
+        """订阅抖音用户的最新作品推送。"""
+        try:
+            parser: DouyinParser = self._get_parser_by_type(DouyinParser)  # type: ignore
+            sec_user_id = await parser.resolve_sec_user_id(user_value)
+            profile = parser._user_profile_cache.get(sec_user_id, {})
+            user_name = profile.get("nickname", "未知用户")
+            target_type, target_id = self._get_subscription_target(event)
+
+            targets = parser.sub_map.setdefault(sec_user_id, {"groups": [], "users": []})
+            if target_id in targets[target_type]:
+                yield event.plain_result(f"当前{'群' if target_type == 'groups' else '私聊'}已订阅抖音用户：{user_name}")
+                return
+
+            targets[target_type].append(target_id)
+            await self.save_douyin_subscription_to_plugin_config()
+            parser.ensure_subscription_task()
+            yield event.plain_result(f"成功订阅抖音用户：{user_name}")
+        except ValueError as exc:
+            if "DouyinParser" in str(exc):
+                yield event.plain_result("抖音相关功能未开启，请检查后台配置是否开启")
+            else:
+                yield event.plain_result(f"参数错误: {exc}\n示例：订阅抖音用户 123456789、MS4wLjABAAAA... 或用户主页链接")
+        except Exception as exc:
+            logger.exception(f"[douyin_订阅] 添加订阅失败: {exc}")
+            yield event.plain_result(f"订阅失败: {exc}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("取消订阅抖音用户")
+    async def unsubscribe_douyin_user(self, event: AstrMessageEvent, user_value: str = ""):
+        """取消当前会话对抖音用户的订阅。"""
+        try:
+            parser: DouyinParser = self._get_parser_by_type(DouyinParser)  # type: ignore
+            sec_user_id = await parser.resolve_sec_user_id(user_value)
+            profile = parser._user_profile_cache.get(sec_user_id, {})
+            user_name = profile.get("nickname", "未知用户")
+            target_type, target_id = self._get_subscription_target(event)
+            targets = parser.sub_map.get(sec_user_id)
+            if not targets or target_id not in targets[target_type]:
+                yield event.plain_result(f"当前{'群' if target_type == 'groups' else '私聊'}没有订阅抖音用户：{user_name}")
+                return
+
+            targets[target_type].remove(target_id)
+            if not targets["groups"] and not targets["users"]:
+                parser.sub_map.pop(sec_user_id)
+                parser._last_aweme_cache.pop(sec_user_id, None)
+                await parser._save_subscription_cache()
+            await self.save_douyin_subscription_to_plugin_config()
+            yield event.plain_result(f"已取消订阅抖音用户：{user_name}")
+        except ValueError as exc:
+            if "DouyinParser" in str(exc):
+                yield event.plain_result("抖音相关功能未开启，请检查后台配置是否开启")
+            else:
+                yield event.plain_result(f"参数错误: {exc}")
+        except Exception as exc:
+            logger.exception(f"[douyin_订阅] 取消订阅失败: {exc}")
+            yield event.plain_result(f"取消订阅失败: {exc}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("查询已订阅抖音用户")
+    async def check_subscribe_douyin_users(self, event: AstrMessageEvent):
+        """查询全部抖音订阅用户及其投递目标。"""
+        try:
+            parser: DouyinParser = self._get_parser_by_type(DouyinParser)  # type: ignore
+            if not parser.sub_map:
+                yield event.plain_result("当前没有任何抖音用户订阅记录")
+                return
+
+            lines = ["抖音用户订阅列表"]
+            for index, (sec_user_id, targets) in enumerate(parser.sub_map.items()):
+                profile = parser._user_profile_cache.get(sec_user_id, {})
+                if not profile.get("nickname") or not profile.get("unique_id"):
+                    if index:
+                        await asyncio.sleep(1)
+                    await parser.refresh_user_profile(sec_user_id)
+                    profile = parser._user_profile_cache.get(sec_user_id, {})
+                name = profile.get("nickname", "未知用户")
+                unique_id = profile.get("unique_id", "未知")
+                groups = "、".join(targets.get("groups", [])) or "无"
+                users = "、".join(targets.get("users", [])) or "无"
+                lines.append(
+                    f"用户：{name}\n抖音号：{unique_id}\nsec_user_id：{sec_user_id}\n"
+                    f"发送至 群：{groups}，个人：{users}\n"
+                    f"主页：https://www.douyin.com/user/{sec_user_id}"
+                )
+            yield event.plain_result("\n".join(lines))
+        except ValueError as exc:
+            if "DouyinParser" in str(exc):
+                yield event.plain_result("抖音相关功能未开启，请检查后台配置是否开启")
+            else:
+                yield event.plain_result(f"查询错误: {exc}")
+        except Exception as exc:
+            logger.exception(f"[douyin_订阅] 查询订阅失败: {exc}")
+            yield event.plain_result(f"查询错误: {exc}")
+
+    @staticmethod
+    def _get_subscription_target(event: AstrMessageEvent) -> tuple[str, str]:
+        """返回当前命令应投递到的群或私聊目标。"""
+        if isinstance(event, AiocqhttpMessageEvent) and not event.is_private_chat():
+            raw = event.message_obj.raw_message
+            group_id = raw.get("group_id", "") if isinstance(raw, dict) else getattr(event.message_obj, "group_id", "")
+            if not group_id:
+                raise ValueError("获取群号失败")
+            return "groups", str(group_id)
+        return "users", str(event.get_sender_id())
+
+    async def save_douyin_subscription_to_plugin_config(self):
+        """将抖音订阅映射写回 parsers_template。"""
+        async with self._plugin_config_lock:
+            parser: DouyinParser = self._get_parser_by_type(DouyinParser)  # type: ignore
+            formatted_list: list[str] = []
+            for sec_user_id, targets in parser.sub_map.items():
+                # 配置对用户展示和维护使用抖音号；sec_user_id 仅保留在内存及资料缓存中。
+                display_id = parser._user_profile_cache.get(sec_user_id, {}).get("unique_id") or sec_user_id
+                parts = [display_id]
+                parts.extend(f"g{group_id}" for group_id in targets.get("groups", []))
+                parts.extend(f"u{user_id}" for user_id in targets.get("users", []))
+                formatted_list.append("-".join(parts))
+
+            target_node: dict[str, Any] | None = next(
+                (item for item in self.cfg.parsers_template if item.get("__template_key") == "douyin"),
+                None,
+            )
+            if target_node is None:
+                target_node = {"__template_key": "douyin"}
+                self.cfg.parsers_template.append(target_node)
+            target_node["sub_uids_users"] = formatted_list
+            self.cfg.save_config()
+            logger.info(f"[douyin_订阅] 配置写入成功，现有 {len(formatted_list)} 条订阅记录")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("查询up直播状态")

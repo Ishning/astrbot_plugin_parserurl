@@ -291,6 +291,50 @@
                         "hint": "开启后预览卡片下面会显示更多文本内容，关闭则只显示链接",
                         "type": "bool",
                         "default": false
+                    },
+                    "sub_enable": {
+                        "description": "启用作品订阅",
+                        "hint": "开启后定时检查已订阅抖音用户的最新作品并主动推送",
+                        "type": "bool",
+                        "default": true
+                    },
+                    "platform_name": {
+                        "description": "平台发送机器人名称",
+                        "hint": "订阅消息将通过指定机器人发送；名称见 AstrBot 管理面板中的机器人名称",
+                        "type": "list",
+                        "default": ["default"]
+                    },
+                    "platform_botid": {
+                        "description": "[非必填]订阅发送账号",
+                        "hint": "留空即可；填写后会指定主动消息使用的机器人账号",
+                        "type": "list",
+                        "default": []
+                    },
+                    "sub_uids_users": {
+                        "description": "[注意填写格式]订阅抖音用户",
+                        "hint": "格式为抖音号-g群号-u用户号；可配置多个群或个人，例如 75326500562-g123-u456。也可通过管理员命令维护。",
+                        "type": "list",
+                        "default": []
+                    },
+                    "only_previewCard": {
+                        "description": "主动订阅消息是否仅发送预览卡片",
+                        "hint": "开启后只发送预览卡片，不再发送正文、视频、图片等富媒体内容",
+                        "type": "bool",
+                        "default": false
+                    },
+                    "sub_interval": {
+                        "description": "轮询间隔（分钟）",
+                        "hint": "检查订阅用户最新作品的时间间隔",
+                        "type": "int",
+                        "slider": {"min": 2, "max": 20, "step": 1},
+                        "default": 3
+                    },
+                    "sub_delay": {
+                        "description": "防抖延迟（秒）",
+                        "hint": "检查多个用户时，每次请求之间的等待时间，避免请求过于频繁",
+                        "type": "int",
+                        "slider": {"min": 2, "max": 20, "step": 1},
+                        "default": 5
                     }
                 }
             },
