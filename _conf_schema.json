@@ -659,6 +659,17 @@
                         "labels": ["正常发送", "模糊封面并以 PDF 发送正文", "忽略媒体，仅发送文本预览"],
                         "default": "ignore"
                     },
+                    "nsfw_blur_strength": {
+                        "description": "R18 封面模糊程度",
+                        "hint": "仅在“模糊封面并以 PDF 发送正文”模式生效；数值越大越模糊，100 为最大模糊",
+                        "type": "int",
+                        "slider": {
+                            "min": 30,
+                            "max": 100,
+                            "step": 1
+                        },
+                        "default": 70
+                    },
                     "max_manga_pages": {
                         "description": "静态多页作品最大页数",
                         "hint": "漫画、普通多页插画及 R18 PDF 发送最大页数",
