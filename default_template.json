@@ -46,6 +46,7 @@
     "cookies": "",
     "refresh_token": "",
     "nsfw_mode": "ignore",
+    "nsfw_blur_strength": 70,
     "max_manga_pages": 3,
     "sub_enable": false,
     "sub_interval": 10,
