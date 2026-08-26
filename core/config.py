@@ -168,6 +168,7 @@ class ParserItem(ConfigNode):
     # Pixiv 配置相关
     refresh_token: str | None
     nsfw_mode: str | None
+    nsfw_blur_strength: int | None
     max_manga_pages: int | None
     ranking_list: bool | None
     ranking_list_R18: bool | None
