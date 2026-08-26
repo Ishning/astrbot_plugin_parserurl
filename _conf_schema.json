@@ -624,6 +624,115 @@
                         "default": false
                     }
                 }
+            },
+            "pixiv": {
+                "name": "Pixiv 解析器",
+                "items": {
+                    "enable": {
+                        "description": "启用",
+                        "type": "bool",
+                        "default": true
+                    },
+                    "use_proxy": {
+                        "description": "使用代理",
+                        "hint": "Pixiv API 与图片 CDN 请求是否使用插件全局代理",
+                        "type": "bool",
+                        "default": true
+                    },
+                    "cookies": {
+                        "description": "网页登录 Cookie",
+                        "hint": "Web Ajax 作品解析需要，请勿泄露他人",
+                        "type": "text",
+                        "default": ""
+                    },
+                    "refresh_token": {
+                        "description": "App API Refresh Token",
+                        "hint": "每日榜单和作者订阅需要，请勿泄露他人",
+                        "type": "text",
+                        "default": ""
+                    },
+                    "nsfw_mode": {
+                        "description": "R18 内容处理方式",
+                        "hint": "R18 与 R18G 作品发送方式",
+                        "type": "string",
+                        "options": ["normal", "blur_cover_pdf", "ignore"],
+                        "labels": ["正常发送", "模糊封面并以 PDF 发送正文", "忽略媒体，仅发送文本预览"],
+                        "default": "ignore"
+                    },
+                    "max_manga_pages": {
+                        "description": "静态多页作品最大页数",
+                        "hint": "漫画、普通多页插画及 R18 PDF 发送最大页数",
+                        "type": "int",
+                        "slider": {
+                            "min": 1,
+                            "max": 20,
+                            "step": 1
+                        },
+                        "default": 3
+                    },
+                    "sub_enable": {
+                        "description": "启用作者作品订阅",
+                        "hint": "定时检查 Pixiv 作者的新作品并主动发送",
+                        "type": "bool",
+                        "default": false
+                    },
+                    "sub_interval": {
+                        "description": "订阅检测间隔（分钟）",
+                        "type": "int",
+                        "slider": {
+                            "min": 2,
+                            "max": 120,
+                            "step": 1
+                        },
+                        "default": 10
+                    },
+                    "sub_uids_users": {
+                        "description": "订阅作者和投递目标",
+                        "hint": "请输入需要订阅的up主的UID和要发送的qq号，格式例如 \"PixivId-g123-u123-....-u11451\"，uid后面跟随需要发送的群号或个人，可发送至多个群/个人号每个号用 - 链接。其中群号前面加g，个人号前面加u，若不加则跳过发送并日志报错提示。多个uid订阅也是一样添加的格式",
+                        "type": "list",
+                        "default": []
+                    },
+                    "platform_name": {
+                        "description": "主动推送机器人名称",
+                        "hint": "订阅开启后让消息往指定机器人名称发送，具体名称详见AstrBot管理面板-机器人-机器人名称",
+                        "type": "list",
+                        "default": ["default"]
+                    },
+                    "platform_botid": {
+                        "description": "主动推送账号（可选）",
+                        "hint": "可以不用填写，这个影响发送出去显示的头像和昵称，留空即可",
+                        "type": "list",
+                        "default": []
+                    },
+                    "ranking_list": {
+                        "description": "发送全年龄综合日榜",
+                        "type": "bool",
+                        "default": true
+                    },
+                    "ranking_list_R18": {
+                        "description": "发送 R18 综合日榜",
+                        "hint": "榜单作品会遵从 R18 内容处理方式的配置进行处理",
+                        "type": "bool",
+                        "default": true
+                    },
+                    "ranking_send_times": {
+                        "description": "每日榜单发送时间",
+                        "hint": "24 小时制 HH:MM，首期仅支持一个时间点",
+                        "type": "string",
+                        "default": "18:00"
+                    },
+                    "ranking_top_n": {
+                        "description": "每日榜单排名数量",
+                        "hint": "每个榜单发送第 1 至第 N 名",
+                        "type": "int",
+                        "slider": {
+                            "min": 1,
+                            "max": 20,
+                            "step": 1
+                        },
+                        "default": 5
+                    }
+                }
             }
         }
     }
