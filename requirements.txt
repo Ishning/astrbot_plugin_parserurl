@@ -7,3 +7,4 @@ apilmoji[tqdm]>=0.3.0,<1.0.0
 bilibili-api-python>=17.4.1,<18.0.0
 yt-dlp[default]>=2025.12.8
 gallery-dl>=1.31.2
+PixivPy-Async>=1.2.14
