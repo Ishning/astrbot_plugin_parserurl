@@ -40,6 +40,235 @@ class PixivParser(BaseParser):
             self.web_headers["Cookie"] = self.mycfg.cookies
         self.image_headers = self.headers.copy()
         self.image_headers["Referer"] = "https://www.pixiv.net/"
+        self._pixiv_tasks: list[asyncio.Task] = []
+        self._state_lock = asyncio.Lock()
+        self.pixiv_data_dir = Path(self.cfg.data_dir) / "pixiv"
+        self.pixiv_data_dir.mkdir(parents=True, exist_ok=True)
+        self._state_file = self.pixiv_data_dir / "state.json"
+        self._state: dict[str, Any] = {"ranking_sent": {}, "works_sent": {}, "user_names": {}}
+        try:
+            if self._state_file.exists():
+                loaded = json.loads(self._state_file.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    self._state.update(loaded)
+        except (OSError, ValueError, TypeError) as exc:
+            logger.error("[pixiv] 状态缓存损坏，已降级为空缓存: %s", exc)
+        self.app_client: PixivAppClient | None = None
+        self.sub_map: dict[int, dict[str, list[str]]] = {}
+        for entry in getattr(self.mycfg, "sub_uids_users", None) or []:
+            parts = str(entry).split("-")
+            if not parts or not parts[0].isdigit():
+                continue
+            uid = int(parts[0]); groups, users = self._targets(str(entry))
+            self.sub_map[uid] = {"groups": groups, "users": users}
+        refresh_token = getattr(self.mycfg, "refresh_token", None)
+        if refresh_token and (getattr(self.mycfg, "sub_enable", False) or getattr(self.mycfg, "ranking_list", False) or getattr(self.mycfg, "ranking_list_R18", False)):
+            self.app_client = PixivAppClient(str(refresh_token), self.proxy)
+            self._pixiv_tasks.append(asyncio.create_task(self._app_login(), name="task_pixiv_app_login"))
+            if getattr(self.mycfg, "sub_enable", False):
+                self._pixiv_tasks.append(asyncio.create_task(self._subscription_loop(), name="task_pixiv_subscription_loop"))
+            if getattr(self.mycfg, "ranking_list", False) or getattr(self.mycfg, "ranking_list_R18", False):
+                self._pixiv_tasks.append(asyncio.create_task(self._ranking_loop(), name="task_pixiv_ranking_loop"))
+
+    async def _app_login(self) -> None:
+        try:
+            new_refresh = await self.app_client.login()  # type: ignore[union-attr]
+            async with self._state_lock:
+                old_refresh = getattr(self.mycfg, "refresh_token", None)
+                self.mycfg.refresh_token = new_refresh
+                try:
+                    self.cfg.save_config()
+                except Exception:
+                    self.mycfg.refresh_token = old_refresh
+                    raise
+        except Exception as exc:
+            logger.warning("[pixiv] App API OAuth 刷新或凭据写回失败: %s", exc)
+
+    async def _save_state(self) -> None:
+        async with self._state_lock:
+            for field in ("ranking_sent", "works_sent"):
+                values = self._state.get(field, {})
+                if len(values) > 5000:
+                    self._state[field] = dict(sorted(values.items(), key=lambda item: item[1])[-5000:])
+            tmp = self._state_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._state, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self._state_file)
+
+    @staticmethod
+    def _app_items(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, dict):
+            values = payload.get("illusts") or payload.get("novels") or []
+        else:
+            values = getattr(payload, "illusts", None) or getattr(payload, "novels", None) or []
+        result: list[dict[str, Any]] = []
+        for value in values:
+            if isinstance(value, dict):
+                result.append(value)
+            elif hasattr(value, "__dict__"):
+                result.append(vars(value))
+            else:
+                fields = ("id", "title", "type", "user", "meta_single_page", "meta_pages", "caption", "description", "create_date")
+                result.append({field: getattr(value, field) for field in fields if hasattr(value, field)})
+        return result
+
+    def _app_result(self, item: dict[str, Any]):
+        pid = str(item.get("id") or item.get("illust_id") or item.get("novel_id") or "")
+        user = item.get("user") or {}
+        title = str(item.get("title") or f"Pixiv 作品 {pid}")
+        is_novel = item.get("type") == "novel" or item.get("novel_id")
+        urls: list[str] = []
+        single = (item.get("meta_single_page") or {}).get("original_image_url")
+        if single:
+            urls.append(str(single))
+        for page in item.get("meta_pages") or []:
+            original = (page.get("image_urls") or {}).get("original")
+            if original:
+                urls.append(str(original))
+        limit = self._page_limit(getattr(self.mycfg, "max_manga_pages", 3))
+        # ``Downloader.download_img`` uses ``@auto_task`` and already returns
+        # ``Task[Path]``; wrapping it in ``asyncio.create_task`` would reject
+        # the task at type-check time (and needlessly double-schedule it).
+        contents: list[MediaContent] = [
+            ImageContent(
+                self.downloader.download_img(
+                    url, headers=self.image_headers, proxy=self.proxy
+                )
+            )
+            for url in urls[:limit]
+        ]
+        restricted = int(item.get("x_restrict") or item.get("xRestrict") or 0) > 0
+        nsfw_mode = getattr(self.mycfg, "nsfw_mode", "ignore")
+        if restricted and nsfw_mode == "blur_cover_pdf":
+            contents = self._create_blur_cover_pdf_contents(urls[:limit])
+            warning = None
+        elif restricted and nsfw_mode == "ignore":
+            contents = []
+            warning = "R18作品因后台设置不予展示"
+        else:
+            warning = None
+        return self.result(
+            title=title,
+            text=str(item.get("caption") or item.get("description") or "") or None,
+            url=(f"https://www.pixiv.net/novel/show.php?id={pid}" if is_novel else f"https://www.pixiv.net/artworks/{pid}"),
+            contents=contents,
+            extra={"pixiv_id": pid, "author_name": str(user.get("name") or "未知作者"), **({"warning": warning} if warning else {})},
+        )
+
+    @staticmethod
+    def _targets(entry: str) -> tuple[list[str], list[str]]:
+        parts = str(entry).split("-")
+        return ([p[1:] for p in parts[1:] if p.startswith("g") and p[1:].isdigit()], [p[1:] for p in parts[1:] if p.startswith("u") and p[1:].isdigit()])
+
+    async def _send_proactive(self, result, groups: list[str], users: list[str]) -> None:
+        from ...render import Renderer
+        from ...sender import MessageSender
+
+        await MessageSender(self.cfg, Renderer(self.cfg)).send_proactive_msg(
+            self.cfg.context, result, groups, users,
+            getattr(self.mycfg, "platform_name", None) or ["default"],
+            platform_botid=getattr(self.mycfg, "platform_botid", None),
+        )
+
+    async def _send_ranking_with_retry(self, result, groups: list[str], users: list[str], key: str) -> None:
+        for attempt in range(1, 4):
+            try:
+                await self._send_proactive(result, groups, users)
+                self._state["ranking_sent"][key] = datetime.now().isoformat()
+                await self._save_state()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if attempt < 3:
+                    await asyncio.sleep(120)
+                    continue
+                logger.warning("[pixiv] 榜单投递尝试 3 次后仍失败，已标记 sent：%s，原因：%s", key, exc)
+                self._state["ranking_sent"][key] = datetime.now().isoformat()
+                await self._save_state()
+
+    async def _subscription_loop(self) -> None:
+        while True:
+            try:
+                if self.app_client:
+                    for entry in getattr(self.mycfg, "sub_uids_users", None) or []:
+                        parts = str(entry).split("-")
+                        if not parts or not parts[0].isdigit():
+                            continue
+                        uid = int(parts[0]); groups, users = self._targets(str(entry)); items = []
+                        for kind in ("illust", "manga"):
+                            try:
+                                items.extend(self._app_items(await self.app_client.user_illusts(uid, kind)))
+                            except Exception as exc:
+                                logger.warning("[pixiv] UID %s %s 列表请求失败: %s", uid, kind, exc)
+                        try:
+                            items.extend(self._app_items(await self.app_client.user_novels(uid)))
+                        except Exception as exc:
+                            logger.warning("[pixiv] UID %s 小说列表请求失败: %s", uid, exc)
+                        items.sort(key=lambda x: str(x.get("create_date") or ""))
+                        window = items[-10:]
+                        for target in [*(f"group:{g}" for g in groups), *(f"user:{u}" for u in users)]:
+                            prefix = f"{uid}:{target}:"
+                            # 首次发现目标时建立最新窗口基线，不补发历史作品。
+                            if not any(key.startswith(prefix) for key in self._state["works_sent"]):
+                                for item in window:
+                                    if item.get("id"):
+                                        self._state["works_sent"][f"{prefix}{item.get('type', 'illust')}:{item['id']}"] = datetime.now().isoformat()
+                                await self._save_state()
+                                continue
+                            for item in window:
+                                if not item.get("id"):
+                                    continue
+                                key = f"{prefix}{item.get('type', 'illust')}:{item['id']}"
+                                if key in self._state["works_sent"]:
+                                    continue
+                                if item.get("type") == "novel":
+                                    try:
+                                        detail = await self.app_client.novel_text(int(item["id"]))
+                                        item["description"] = detail.get("novel_text") or detail.get("content") or item.get("description", "")
+                                    except Exception as exc:
+                                        logger.warning("[pixiv] 小说正文获取失败 %s: %s", item.get("id"), exc)
+                                        continue
+                                target_id = target.split(":", 1)[1]
+                                await self._send_proactive(self._app_result(item), [target_id] if target.startswith("group:") else [], [target_id] if target.startswith("user:") else [])
+                                self._state["works_sent"][key] = datetime.now().isoformat()
+                                await self._save_state()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("[pixiv] 作者订阅轮询失败: %s", exc)
+            await asyncio.sleep(max(120, int(getattr(self.mycfg, "sub_interval", 10) or 10) * 60))
+
+    async def _ranking_loop(self) -> None:
+        while True:
+            try:
+                now = datetime.now(self.cfg.timezone)
+                if now.strftime("%H:%M") == str(getattr(self.mycfg, "ranking_send_times", "18:00") or "") and self.app_client:
+                    targets = getattr(self.mycfg, "ranking_subscriptions", None) or []
+                    configured_time = str(getattr(self.mycfg, "ranking_send_times", "18:00") or "")
+                    for mode, enabled in (("day", getattr(self.mycfg, "ranking_list", False)), ("day_r18", getattr(self.mycfg, "ranking_list_R18", False))):
+                        if not enabled:
+                            continue
+                        ranking_payload = await self.app_client.illust_ranking(mode)
+                        items = self._app_items(ranking_payload)[:max(1, min(20, int(getattr(self.mycfg, "ranking_top_n", 5) or 5)))]
+                        ranking_date = ranking_payload.get("date") if isinstance(ranking_payload, dict) else None
+                        for target in targets:
+                            parts = str(target).split(":")
+                            target_time = ":".join(parts[2:]) if len(parts) >= 4 else (parts[2] if len(parts) == 3 else "")
+                            if len(parts) < 3 or (target_time != "default" and target_time != configured_time):
+                                continue
+                            groups = [parts[1]] if parts[0] == "group" else []; users = [parts[1]] if parts[0] == "user" else []
+                            for rank, item in enumerate(items, 1):
+                                key = f"{now.date()}:{mode}:{target}:{rank}"
+                                if key in self._state["ranking_sent"]:
+                                    continue
+                                result = self._app_result(item)
+                                result.extra["ranking_date"] = ranking_date or str(now.date())
+                                await self._send_ranking_with_retry(result, groups, users, key)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("[pixiv] 榜单发送失败: %s", exc)
+            await asyncio.sleep(60)
 
     @staticmethod
     def _clean_comment(value: Any) -> str | None:
@@ -134,47 +363,7 @@ class PixivParser(BaseParser):
             logger.warning("Pixiv 作者头像获取失败: %s", user_id)
         return None
 
-    async def _fetch_novel_series_total(self, series_id: Any) -> int | None:
-        """获取小说系列总话数；系列接口失败时降级为无系列总数。"""
-        if not series_id:
-            return None
-        try:
-            async with self.session.get(
-                f"https://www.pixiv.net/ajax/novel/series/{series_id}",
-                headers=self.web_headers,
-                proxy=self.proxy,
-            ) as response:
-                if response.status != 200:
-                    return None
-                payload = await response.json(content_type=None)
-            if not isinstance(payload, dict) or payload.get("error"):
-                return None
-            body = payload.get("body")
-            if not isinstance(body, dict) or body.get("total") is None:
-                return None
-            return int(body["total"])
-        except (ClientError, TimeoutError, ValueError, TypeError):
-            logger.warning("Pixiv 小说系列信息获取失败: %s", series_id)
-            return None
-
-    async def _novel_series_text(self, body: dict[str, Any], user_id: Any) -> str | None:
-        series = body.get("seriesNavData")
-        if not isinstance(series, dict) or not series.get("seriesId"):
-            return None
-        series_id = series.get("seriesId")
-        order = series.get("order")
-        series_title = str(series.get("title") or "未命名系列")
-        total = await self._fetch_novel_series_total(series_id)
-        progress = f"当前第 {order} 话" if order is not None else None
-        if total is not None:
-            progress = f"{progress}，共 {total} 话" if progress else f"共 {total} 话"
-        series_url = (
-            f"https://www.pixiv.net/user/{user_id}/series/{series_id}"
-            if user_id
-            else f"https://www.pixiv.net/novel/series/{series_id}"
-        )
-        details = " · ".join(part for part in (progress, series_url) if part)
-        return f"小说系列：{series_title}" + (f"\n{details}" if details else "")
+    # ---------- 作品解析 ----------
 
     def _create_blur_cover_pdf_contents(self, image_urls: list[str]) -> list[MediaContent]:
         """为 R18 多页静态作品创建模糊封面及正文 PDF 下载任务。"""
@@ -321,6 +510,8 @@ class PixivParser(BaseParser):
             extra={**extra, **({"info": stats} if (stats := self._stats_text(body)) else {})},
         )
 
+    # ---------- 小说解析 ----------
+
     @staticmethod
     def _clean_novel_content(value: Any) -> str | None:
         """清理 Pixiv 小说正文标记，同时保留正文换行。"""
@@ -354,6 +545,17 @@ class PixivParser(BaseParser):
 
             return [ImageContent(create_task(blur_cover()))]
         return list(self.create_image_contents([url], headers=self.image_headers))
+
+    async def _fetch_novel_series_total(self, series_id: Any) -> int | None:
+        """获取小说系列总话数；系列接口失败时降级为无系列总数。"""
+        body = await self._fetch_novel_series_detail(series_id)
+        if not body or body.get("total") is None:
+            return None
+        try:
+            return int(str(body["total"]))
+        except (TypeError, ValueError):
+            logger.debug("Pixiv 小说系列总话数格式异常: %s", series_id)
+            return None
 
     async def _fetch_novel_series_detail(self, series_id: Any) -> dict[str, Any] | None:
         """获取小说系列完整资料，供系列预览使用。"""
