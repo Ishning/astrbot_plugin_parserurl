@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import html
+import json
 import re
+import asyncio
 from asyncio import TimeoutError, create_task, gather
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -14,6 +17,7 @@ from ..base import BaseParser, handle
 from ...data import FileContent, ImageContent, MediaContent, Platform
 from ...exception import ParseException
 from .nsfw import create_blurred_cover, create_body_pdf
+from .app_client import PixivAppClient
 
 
 class PixivParser(BaseParser):
@@ -370,6 +374,25 @@ class PixivParser(BaseParser):
             logger.warning("Pixiv 小说系列详情获取失败: %s", series_id)
             return None
 
+    async def _novel_series_text(self, body: dict[str, Any], user_id: Any) -> str | None:
+        series = body.get("seriesNavData")
+        if not isinstance(series, dict) or not series.get("seriesId"):
+            return None
+        series_id = series.get("seriesId")
+        order = series.get("order")
+        series_title = str(series.get("title") or "未命名系列")
+        total = await self._fetch_novel_series_total(series_id)
+        progress = f"当前第 {order} 话" if order is not None else None
+        if total is not None:
+            progress = f"{progress}，共 {total} 话" if progress else f"共 {total} 话"
+        series_url = (
+            f"https://www.pixiv.net/user/{user_id}/series/{series_id}"
+            if user_id
+            else f"https://www.pixiv.net/novel/series/{series_id}"
+        )
+        details = " · ".join(part for part in (progress, series_url) if part)
+        return f"小说系列：{series_title}" + (f"\n{details}" if details else "")
+
     @handle(
         "pixiv.net/novel/show",
         r"https?://(?:www\.)?pixiv\.net/novel/show\.php\?(?:[^\s#]*&)?id=(?P<nid>\d+)(?:[&#][^\s]*)?",
@@ -510,3 +533,12 @@ class PixivParser(BaseParser):
             return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
         except (TypeError, ValueError, OverflowError):
             return None
+
+    async def close_session(self) -> None:
+        for task in self._pixiv_tasks:
+            task.cancel()
+        if self._pixiv_tasks:
+            await asyncio.gather(*self._pixiv_tasks, return_exceptions=True)
+        if self.app_client:
+            await self.app_client.close()
+        await super().close_session()
