@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -8,6 +9,47 @@ import pytest
 from core.parsers.pixiv import PixivParser
 from core.parsers.pixiv.nsfw import _blur_radius, create_blurred_cover, create_body_pdf
 from core.data import FileContent, ImageContent
+
+
+@pytest.mark.asyncio
+async def test_ranking_retry_marks_sent_after_success(monkeypatch):
+    parser = object.__new__(PixivParser)
+    parser._state = {"ranking_sent": {}, "works_sent": {}}
+    parser._save_state = MagicMock(side_effect=lambda: asyncio.sleep(0))
+    calls = 0
+
+    async def send(*args):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise OSError("network")
+
+    parser._send_proactive = send
+    async def no_sleep(*_):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    await parser._send_ranking_with_retry(object(), [], [], "k")
+    assert calls == 3
+    assert "k" in parser._state["ranking_sent"]
+
+
+@pytest.mark.asyncio
+async def test_ranking_retry_marks_sent_after_three_failures(monkeypatch):
+    parser = object.__new__(PixivParser)
+    parser._state = {"ranking_sent": {}, "works_sent": {}}
+    parser._save_state = MagicMock(side_effect=lambda: asyncio.sleep(0))
+
+    async def send(*args):
+        raise OSError("network")
+
+    parser._send_proactive = send
+    async def no_sleep(*_):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    await parser._send_ranking_with_retry(object(), [], [], "failed")
+    assert "failed" in parser._state["ranking_sent"]
 
 
 def test_pixiv_artwork_routes():
