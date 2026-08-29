@@ -711,6 +711,13 @@ class ParserPlugin(Star):
         records.append(f"{prefix}{when}")
         parser.mycfg.ranking_subscriptions = records
         await self._save_pixiv_config(parser)
+        logger.info(
+            "[pixiv] %s %s 订阅每日榜单，订阅时间：%s，系统当前时间：%s",
+            target_type,
+            target_id,
+            when,
+            datetime.now(self.cfg.timezone).isoformat(),
+        )
         yield event.plain_result(f"已订阅 Pixiv 每日榜单，时间：{'跟随后台默认时间' if when == 'default' else when}")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
