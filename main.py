@@ -2,6 +2,8 @@
 
 import asyncio
 import re
+from datetime import datetime
+from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import filter
@@ -18,7 +20,7 @@ from .core.clean import CacheCleaner
 from .core.config import PluginConfig
 from .core.debounce import Debouncer
 from .core.download import Downloader
-from .core.parsers import BaseParser, BilibiliParser
+from .core.parsers import BaseParser, BilibiliParser, PixivParser
 from .core.render import Renderer
 from .core.sender import MessageSender
 from .core.utils import extract_json_url
@@ -572,3 +574,180 @@ class ParserPlugin(Star):
             except Exception as e:
                 logger.error(f"[bili_订阅] 写入该插件的配置文件失败: {e}")
                 raise e
+
+    async def _pixiv_target(self, event: AstrMessageEvent) -> tuple[str, str]:
+        if isinstance(event, AiocqhttpMessageEvent) and not event.is_private_chat():
+            raw = event.message_obj.raw_message
+            target_id = str(raw.get("group_id", "")) if isinstance(raw, dict) else str(getattr(event.message_obj, "group_id", ""))
+            return "group", target_id
+        return "user", str(event.get_sender_id())
+
+    async def _save_pixiv_config(self, parser: PixivParser) -> None:
+        async with self._plugin_config_lock:
+            values: list[str] = []
+            for uid, targets in parser.sub_map.items():
+                values.append("-".join([str(uid), *(f"g{x}" for x in targets.get("groups", [])), *(f"u{x}" for x in targets.get("users", []))]))
+            ranking: list[str] = list(getattr(parser.mycfg, "ranking_subscriptions", None) or [])
+            node: dict[str, Any] | None = next((item for item in self.cfg.parsers_template if item.get("__template_key") == "pixiv"), None)
+            if node is None:
+                node = {"__template_key": "pixiv"}; self.cfg.parsers_template.append(node)
+            node["sub_uids_users"] = values
+            node["ranking_subscriptions"] = ranking
+            self.cfg.save_config()
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("订阅pixiv用户")
+    async def subscribe_pixiv_user(self, event: AstrMessageEvent, uid_str: str = ""):
+        if not uid_str.isdigit():
+            yield event.plain_result("Pixiv ID 不能为空且为数字")
+            return
+        parser: PixivParser | None = None
+        old_sub_map: dict[int, dict[str, list[str]]] = {}
+        old_state: dict[str, Any] = {}
+        try:
+            parser = self._get_parser_by_type(PixivParser)  # type: ignore
+            assert parser is not None
+            old_sub_map = {key: {kind: list(values) for kind, values in item.items()} for key, item in parser.sub_map.items()}
+            old_state = dict(parser._state.get("works_sent", {}))
+            if parser.app_client is None:
+                yield event.plain_result("Pixiv App API 未启用或未配置 refresh_token")
+                return
+            target_type, target_id = await self._pixiv_target(event)
+            uid = int(uid_str)
+            payload = await parser.app_client.user_detail(uid)
+            user = payload.get("user") if isinstance(payload, dict) else getattr(payload, "user", None)
+            username = str((user or {}).get("name", uid) if isinstance(user, dict) else getattr(user, "name", uid))
+            existing = parser.sub_map.get(uid)
+            target_bucket = existing[f"{target_type}s"] if existing else []
+            targets = target_bucket
+            if target_id in targets:
+                yield event.plain_result(f"已经订阅 Pixiv 用户：{username}，ID：{uid}")
+                return
+            kinds = ("illust", "manga")
+            items = []
+            for kind in kinds:
+                items.extend(parser._app_items(await parser.app_client.user_illusts(uid, kind)))
+            items.extend(parser._app_items(await parser.app_client.user_novels(uid)))
+            # 所有远程请求成功后才提交内存状态，避免失败留下半条订阅。
+            parser.sub_map.setdefault(uid, {"groups": [], "users": []})
+            parser.sub_map[uid][f"{target_type}s"].append(target_id)
+            prefix = f"{uid}:{target_type}:{target_id}:"
+            for item in sorted(items, key=lambda x: str(x.get("create_date") or ""))[-10:]:
+                if item.get("id"):
+                    parser._state["works_sent"][f"{prefix}{item.get('type', 'illust')}:{item['id']}"] = datetime.now().isoformat()
+            await parser._save_state()
+            parser._state["user_names"][str(uid)] = {"name": username, "updated_at": datetime.now().isoformat()}
+            await parser._save_state()
+            await self._save_pixiv_config(parser)
+            yield event.plain_result(f"已经订阅 Pixiv 用户：{username}，ID：{uid}，地址：https://www.pixiv.net/users/{uid}")
+        except ValueError as exc:
+            yield event.plain_result(f"Pixiv 用户查询失败：{exc}")
+        except Exception as exc:
+            if parser is not None:
+                parser.sub_map = old_sub_map
+                parser._state["works_sent"] = old_state
+                await parser._save_state()
+            logger.exception("[pixiv_订阅] 添加失败: %s", exc)
+            yield event.plain_result("Pixiv 用户订阅失败，请稍后再试")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("取消订阅pixiv用户")
+    async def unsubscribe_pixiv_user(self, event: AstrMessageEvent, uid_str: str = ""):
+        if not uid_str.isdigit():
+            yield event.plain_result("Pixiv ID 不能为空且为数字")
+            return
+        try:
+            parser: PixivParser = self._get_parser_by_type(PixivParser)  # type: ignore
+            target_type, target_id = await self._pixiv_target(event); uid = int(uid_str)
+            targets = parser.sub_map.get(uid, {}).get(f"{target_type}s", [])
+            if target_id not in targets:
+                yield event.plain_result(f"当前会话未订阅 Pixiv 用户：{uid}")
+                return
+            targets.remove(target_id)
+            if not parser.sub_map[uid]["groups"] and not parser.sub_map[uid]["users"]:
+                parser.sub_map.pop(uid)
+                parser._state.get("user_names", {}).pop(str(uid), None)
+                for key in list(parser._state.get("works_sent", {})):
+                    if key.startswith(f"{uid}:"):
+                        parser._state["works_sent"].pop(key, None)
+                await parser._save_state()
+            await self._save_pixiv_config(parser)
+            yield event.plain_result(f"已取消订阅 Pixiv 用户：ID：{uid}")
+        except Exception:
+            yield event.plain_result("取消 Pixiv 用户订阅失败，请稍后再试")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("查询已订阅pixiv用户", alias={"查询已订阅pixix用户"})
+    async def check_pixiv_users(self, event: AstrMessageEvent):
+        try:
+            parser: PixivParser = self._get_parser_by_type(PixivParser)  # type: ignore
+            if not parser.sub_map:
+                yield event.plain_result("当前没有任何 Pixiv 用户订阅记录")
+                return
+            lines = ["Pixiv 用户订阅列表"]
+            for uid in parser.sub_map:
+                cached = parser._state.get("user_names", {}).get(str(uid), {})
+                name = cached.get("name") if isinstance(cached, dict) else None
+                lines.append(f"用户名：{name or '未知'}，ID：{uid}，地址：https://www.pixiv.net/users/{uid}")
+            yield event.plain_result("\n".join(lines))
+        except ValueError:
+            yield event.plain_result("Pixiv 相关功能未开启，请检查后台配置")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("订阅pixiv每日榜单")
+    async def subscribe_pixiv_ranking(self, event: AstrMessageEvent, args: str = ""):
+        tokens = str(args).split()
+        if len(tokens) > 1 or (tokens and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", tokens[0])):
+            yield event.plain_result("格式错误，请填写一个 HH:MM 时间")
+            return
+        parser: PixivParser = self._get_parser_by_type(PixivParser)  # type: ignore
+        target_type, target_id = await self._pixiv_target(event)
+        when = tokens[0] if tokens else "default"
+        prefix = f"{target_type}:{target_id}:"
+        records = list(getattr(parser.mycfg, "ranking_subscriptions", None) or [])
+        if any(str(x).startswith(prefix) for x in records):
+            yield event.plain_result("当前会话已经订阅 Pixiv 每日榜单")
+            return
+        records.append(f"{prefix}{when}")
+        parser.mycfg.ranking_subscriptions = records
+        await self._save_pixiv_config(parser)
+        logger.info(
+            "[pixiv] %s %s 订阅每日榜单，订阅时间：%s，系统当前时间：%s",
+            target_type,
+            target_id,
+            when,
+            datetime.now(self.cfg.timezone).isoformat(),
+        )
+        yield event.plain_result(f"已订阅 Pixiv 每日榜单，时间：{'跟随后台默认时间' if when == 'default' else when}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("取消订阅pixiv每日榜单")
+    async def unsubscribe_pixiv_ranking(self, event: AstrMessageEvent, args: str = ""):
+        tokens = str(args).split()
+        target_type, target_id = await self._pixiv_target(event)
+        parser: PixivParser = self._get_parser_by_type(PixivParser)  # type: ignore
+        records = list(getattr(parser.mycfg, "ranking_subscriptions", None) or [])
+        prefix = f"{target_type}:{target_id}:"; wanted = tokens[0] if tokens else None
+        matched = [x for x in records if str(x).startswith(prefix) and (wanted is None or str(x).rsplit(":", 1)[-1] == wanted)]
+        if not matched:
+            yield event.plain_result("当前会话未订阅该 Pixiv 每日榜单时间")
+            return
+        parser.mycfg.ranking_subscriptions = [x for x in records if x not in matched]
+        await self._save_pixiv_config(parser)
+        yield event.plain_result("已取消 Pixiv 每日榜单订阅")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("查询pixiv每日榜单订阅")
+    async def check_pixiv_ranking(self, event: AstrMessageEvent):
+        parser: PixivParser = self._get_parser_by_type(PixivParser)  # type: ignore
+        records = getattr(parser.mycfg, "ranking_subscriptions", None) or []
+        default_time = getattr(parser.mycfg, "ranking_send_times", "18:00")
+        if not records:
+            yield event.plain_result("当前没有 Pixiv 每日榜单订阅记录")
+            return
+        lines = ["Pixiv 每日榜单订阅列表"]
+        for record in records:
+            parts = str(record).split(":")
+            when = ":".join(parts[2:])
+            lines.append(f"{parts[0]} {parts[1]}：{'跟随默认时间 ' + str(default_time) if when == 'default' else when}")
+        yield event.plain_result("\n".join(lines))

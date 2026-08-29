@@ -165,6 +165,17 @@ class ParserItem(ConfigNode):
     platform_name: list[str] | None
     platform_botid: list[str] | None
     sub_uids_users: list[str] | None
+    # Pixiv 配置相关
+    refresh_token: str | None
+    nsfw_mode: str | None
+    nsfw_blur_strength: int | None
+    max_manga_pages: int | None
+    ranking_list: bool | None
+    ranking_list_R18: bool | None
+    ranking_send_times: str | None
+    ranking_top_n: int | None
+    # 维护的榜单订阅持久化数据（不作为常规项）
+    ranking_subscriptions: list[str] | None
     only_previewCard: bool | None
     ignore_lottery: bool | None
     ignore_lottery_content: list[str] | None
@@ -192,6 +203,7 @@ class ParserConfig(ConfigNodeContainer):
     zhihu: ParserItem
     xhs: ParserItem
     youtube: ParserItem
+    pixiv: ParserItem
 
     def __init__(self, nodes: list[dict[str, Any]]):
         super().__init__(nodes, item_cls=ParserItem)

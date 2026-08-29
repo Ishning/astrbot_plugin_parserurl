@@ -38,5 +38,27 @@
     "cookies": "",
     "show_body_text": true,
     "video_send_mode": "first"
+  },
+  {
+    "__template_key": "pixiv",
+    "enable": true,
+    "use_proxy": true,
+    "cookies": "",
+    "show_preview_detail": false,
+    "refresh_token": "",
+    "nsfw_mode": "ignore",
+    "nsfw_blur_strength": 70,
+    "max_manga_pages": 3,
+    "sub_enable": false,
+    "sub_interval": 10,
+    "sub_uids_users": [],
+    "platform_name": ["default"],
+    "platform_botid": [],
+    "only_previewCard": false,
+    "ranking_list": true,
+    "ranking_list_R18": true,
+    "ranking_send_times": "18:00",
+    "ranking_top_n": 5,
+    "ranking_subscriptions": []
   }
 ]

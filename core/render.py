@@ -106,6 +106,7 @@ class FontSet:
     _FONT_SIZES = (
         ("name", 28),
         ("title", 30),
+        ("warning", 38),
         ("text", 24),
         ("extra", 24),
         ("indicator", 60),
@@ -114,6 +115,7 @@ class FontSet:
 
     name_font: FontInfo
     title_font: FontInfo
+    warning_font: FontInfo
     text_font: FontInfo
     extra_font: FontInfo
     indicator_font: FontInfo
@@ -165,6 +167,13 @@ class CoverSectionData(SectionData):
 @dataclass(eq=False, frozen=True, slots=True)
 class TextSectionData(SectionData):
     """文本部分数据"""
+
+    lines: list[str]
+
+
+@dataclass(eq=False, frozen=True, slots=True)
+class WarningSectionData(SectionData):
+    """强调提示部分数据"""
 
     lines: list[str]
 
@@ -280,6 +289,7 @@ class Renderer:
     HEADER_COLOR: ClassVar[Color] = (0, 122, 255)
     """标题色"""
     EXTRA_COLOR: ClassVar[Color] = (136, 136, 136)
+    WARNING_COLOR: ClassVar[Color] = (210, 35, 35)
     """额外信息色"""
     REPOST_BG_COLOR: ClassVar[Color] = (247, 247, 247)
     """转发背景色"""
@@ -670,7 +680,15 @@ class Renderer:
                 if graphics_section:
                     sections.append(graphics_section)
 
-        # 5. 文本内容
+        # 5. 强调提示（位于正文之前）
+        if warning := result.extra.get("warning"):
+            warning_lines = self._wrap_text(
+                str(warning), content_width, self.fontset.warning_font
+            )
+            warning_height = len(warning_lines) * self.fontset.warning_font.line_height
+            sections.append(WarningSectionData(height=warning_height, lines=warning_lines))
+
+        # 6. 文本内容
         if result.text:
             text_lines = self._wrap_text(
                 result.text,
@@ -680,7 +698,7 @@ class Renderer:
             text_height = len(text_lines) * self.fontset.text_font.line_height
             sections.append(TextSectionData(height=text_height, lines=text_lines))
 
-        # 6. 额外信息
+        # 7. 额外信息
         if result.extra_info:
             extra_lines = self._wrap_text(
                 result.extra_info,
@@ -906,6 +924,8 @@ class Renderer:
                     await self._draw_title(ctx, title.lines)
                 case CoverSectionData() as cover:
                     self._draw_cover(ctx, cover.cover_img)
+                case WarningSectionData() as warning:
+                    await self._draw_warning(ctx, warning.lines)
                 case TextSectionData() as text:
                     await self._draw_text(ctx, text.lines)
                 case GraphicsSectionData() as graphics:
@@ -1068,6 +1088,17 @@ class Renderer:
             lines,
             self.fontset.text_font,
             fill=self.TEXT_COLOR,
+        )
+        ctx.y_pos += self.SECTION_SPACING
+
+    async def _draw_warning(self, ctx: RenderContext, lines: list[str]) -> None:
+        """以标题字号绘制强调提示。"""
+        ctx.y_pos += await self.text(
+            ctx,
+            (self.PADDING, ctx.y_pos),
+            lines,
+            self.fontset.warning_font,
+            fill=self.WARNING_COLOR,
         )
         ctx.y_pos += self.SECTION_SPACING
 
