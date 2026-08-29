@@ -2,7 +2,7 @@ name: astrbot_plugin_parserurl
 display_name: 社交媒体链接自动解析插件
 desc: 多平台链接解析并发送内容，同时支持订阅用户有更新主动推送新内容
 help: 略
-version: v2.6.1
+version: v2.7.0
 author: Ishning
 repo: https://github.com/Ishning/astrbot_plugin_parserURL
 astrbot_version: ">=4.5.2"
