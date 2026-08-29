@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from uuid import uuid4
 import zipfile
@@ -47,9 +48,8 @@ async def create_blurred_cover(
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"pixiv_r18_cover_{uuid4().hex}.jpg"
-    # Pillow 的 PDF/JPEG 编码在当前 AstrBot 运行环境中不能可靠地放入线程池，
-    # 因此保持在当前协程中执行；网络下载仍由 Downloader 异步完成。
-    return _blur_cover(source, output, blur_strength)
+    # Pillow 的模糊和 JPEG 编码是 CPU 密集操作，放入线程避免阻塞事件循环。
+    return await asyncio.to_thread(_blur_cover, source, output, blur_strength)
 
 
 async def create_body_pdf(
@@ -57,7 +57,8 @@ async def create_body_pdf(
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"pixiv_r18_pages_{uuid4().hex}.pdf"
-    result = _build_pdf(sources, output)
+    # Pillow 的 PDF 编码是 CPU 密集操作，放入线程避免阻塞事件循环。
+    result = await asyncio.to_thread(_build_pdf, sources, output)
     if result.stat().st_size > max_size_mb * 1024 * 1024:
         result.unlink(missing_ok=True)
         raise SizeLimitException()
@@ -70,27 +71,32 @@ async def create_ugoira_gif(
     """Convert a Pixiv ugoira ZIP archive to GIF and enforce its size limit."""
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"pixiv_ugoira_{uuid4().hex}.gif"
-    images: list[Image.Image] = []
-    try:
-        with zipfile.ZipFile(archive) as zipped:
-            for frame in frames:
-                name = str(frame.get("file") or "")
-                if not name:
-                    continue
-                try:
-                    with zipped.open(name) as source:
-                        images.append(Image.open(source).convert("RGB"))
-                except (KeyError, OSError):
-                    continue
-        if not images:
-            raise ValueError("ugoira ZIP 没有可用帧")
-        durations = [int(frame.get("delay") or 100) for frame in frames[: len(images)]]
-        images[0].save(output, "GIF", save_all=True, append_images=images[1:], duration=durations, loop=0, optimize=False)
-        if output.stat().st_size > max_size_mb * 1024 * 1024:
-            output.unlink(missing_ok=True)
-            raise SizeLimitException()
-        return output
-    finally:
-        for image in images:
-            image.close()
-        archive.unlink(missing_ok=True)
+
+    def build() -> Path:
+        images: list[Image.Image] = []
+        try:
+            with zipfile.ZipFile(archive) as zipped:
+                for frame in frames:
+                    name = str(frame.get("file") or "")
+                    if not name:
+                        continue
+                    try:
+                        with zipped.open(name) as source:
+                            images.append(Image.open(source).convert("RGB"))
+                    except (KeyError, OSError):
+                        continue
+            if not images:
+                raise ValueError("ugoira ZIP 没有可用帧")
+            durations = [int(frame.get("delay") or 100) for frame in frames[: len(images)]]
+            images[0].save(output, "GIF", save_all=True, append_images=images[1:], duration=durations, loop=0, optimize=False)
+            if output.stat().st_size > max_size_mb * 1024 * 1024:
+                output.unlink(missing_ok=True)
+                raise SizeLimitException()
+            return output
+        finally:
+            for image in images:
+                image.close()
+            archive.unlink(missing_ok=True)
+
+    # ZIP 解码及 GIF 编码均可能消耗较多 CPU，放入线程避免阻塞事件循环。
+    return await asyncio.to_thread(build)

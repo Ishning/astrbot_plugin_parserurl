@@ -41,6 +41,8 @@ class PixivParser(BaseParser):
         self.image_headers = self.headers.copy()
         self.image_headers["Referer"] = "https://www.pixiv.net/"
         self._pixiv_tasks: list[asyncio.Task] = []
+        self._media_tasks: set[asyncio.Task[Any]] = set()
+        self._ugoira_semaphore = asyncio.Semaphore(2)
         self._state_lock = asyncio.Lock()
         self._app_ready = asyncio.Event()
         self.pixiv_data_dir = Path(self.cfg.data_dir) / "pixiv"
@@ -182,8 +184,11 @@ class PixivParser(BaseParser):
                     except SizeLimitException:
                         extra["warning"] = "图片超过资源大小限制已跳过下载，若需要请调整后台下载大小限制"
                         raise
-                    return await create_ugoira_gif(archive, self.cfg.cache_dir / "pixiv_ugoira", frames, 5)
-                contents.append(FileContent(create_task(build_gif()), name="pixiv_ugoira.gif"))
+                    async with self._ugoira_semaphore:
+                        return await create_ugoira_gif(
+                            archive, self.cfg.cache_dir / "pixiv_ugoira", frames, 5
+                        )
+                contents.append(FileContent(self._create_media_task(build_gif()), name="pixiv_ugoira.gif"))
         if restricted and nsfw_mode == "blur_cover_pdf":
             contents = self._create_blur_cover_pdf_contents(urls[:limit], extra)
             warning = None
@@ -222,7 +227,7 @@ class PixivParser(BaseParser):
                         extra["warning"] = "图片超过资源大小限制已跳过下载，若需要请调整后台下载大小限制"
                     raise
 
-            contents.append(ImageContent(create_task(download())))
+            contents.append(ImageContent(self._create_media_task(download())))
         return contents
 
     @staticmethod
@@ -240,6 +245,16 @@ class PixivParser(BaseParser):
             platform_botid=getattr(self.mycfg, "platform_botid", None),
             only_previewCard=bool(getattr(self.mycfg, "only_previewCard", False)),
         )
+
+    def _create_media_task(self, coroutine) -> asyncio.Task[Any]:
+        """创建并登记媒体任务，确保插件关闭时可以取消未完成任务。"""
+        if not hasattr(self, "_media_tasks"):
+            # 兼容未经过完整构造函数初始化的测试/嵌入场景。
+            self._media_tasks = set()
+        task = asyncio.create_task(coroutine)
+        self._media_tasks.add(task)
+        task.add_done_callback(self._media_tasks.discard)
+        return task
 
     async def _send_ranking_with_retry(self, result, groups: list[str], users: list[str], key: str) -> None:
         for attempt in range(1, 4):
@@ -616,7 +631,7 @@ class PixivParser(BaseParser):
                 self._blur_strength(getattr(self.mycfg, "nsfw_blur_strength", 70)),
             )
 
-        contents: list[MediaContent] = [ImageContent(create_task(blur_cover()))]
+        contents: list[MediaContent] = [ImageContent(self._create_media_task(blur_cover()))]
         if len(image_urls) > 1:
 
             async def body_pdf() -> Path:
@@ -639,7 +654,7 @@ class PixivParser(BaseParser):
 
             contents.append(
                 FileContent(
-                    create_task(body_pdf()),
+                    self._create_media_task(body_pdf()),
                     name="pixiv_r18_pages.pdf",
                 )
             )
@@ -790,7 +805,7 @@ class PixivParser(BaseParser):
                     self._blur_strength(getattr(self.mycfg, "nsfw_blur_strength", 70)),
                 )
 
-            return [ImageContent(create_task(blur_cover()))]
+            return [ImageContent(self._create_media_task(blur_cover()))]
         return self._create_pixiv_image_contents([url], extra)
 
     async def _fetch_novel_series_total(self, series_id: Any) -> int | None:
@@ -990,6 +1005,12 @@ class PixivParser(BaseParser):
             task.cancel()
         if self._pixiv_tasks:
             await asyncio.gather(*self._pixiv_tasks, return_exceptions=True)
+        media_tasks = list(self._media_tasks)
+        for task in media_tasks:
+            task.cancel()
+        if media_tasks:
+            await asyncio.gather(*media_tasks, return_exceptions=True)
+        self._media_tasks.clear()
         if self.app_client:
             await self.app_client.close()
         await super().close_session()
