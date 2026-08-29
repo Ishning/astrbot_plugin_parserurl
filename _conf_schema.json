@@ -645,6 +645,12 @@
                         "type": "text",
                         "default": ""
                     },
+                    "show_preview_detail": {
+                        "description": "预览卡片更多内容控制",
+                        "hint": "开启后预览卡片下面会显示更多文本内容，关闭则只显示链接",
+                        "type": "bool",
+                        "default": false
+                    },
                     "refresh_token": {
                         "description": "App API Refresh Token",
                         "hint": "每日榜单和作者订阅需要，请勿泄露他人",
