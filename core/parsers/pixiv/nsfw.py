@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from uuid import uuid4
+import zipfile
 
 from PIL import Image, ImageFilter
 
@@ -61,3 +62,35 @@ async def create_body_pdf(
         result.unlink(missing_ok=True)
         raise SizeLimitException()
     return result
+
+
+async def create_ugoira_gif(
+    archive: Path, output_dir: Path, frames: list[dict], max_size_mb: int = 5
+) -> Path:
+    """Convert a Pixiv ugoira ZIP archive to GIF and enforce its size limit."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"pixiv_ugoira_{uuid4().hex}.gif"
+    images: list[Image.Image] = []
+    try:
+        with zipfile.ZipFile(archive) as zipped:
+            for frame in frames:
+                name = str(frame.get("file") or "")
+                if not name:
+                    continue
+                try:
+                    with zipped.open(name) as source:
+                        images.append(Image.open(source).convert("RGB"))
+                except (KeyError, OSError):
+                    continue
+        if not images:
+            raise ValueError("ugoira ZIP 没有可用帧")
+        durations = [int(frame.get("delay") or 100) for frame in frames[: len(images)]]
+        images[0].save(output, "GIF", save_all=True, append_images=images[1:], duration=durations, loop=0, optimize=False)
+        if output.stat().st_size > max_size_mb * 1024 * 1024:
+            output.unlink(missing_ok=True)
+            raise SizeLimitException()
+        return output
+    finally:
+        for image in images:
+            image.close()
+        archive.unlink(missing_ok=True)
