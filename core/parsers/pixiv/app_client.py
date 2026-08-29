@@ -1,4 +1,6 @@
-"""Pixiv App API client used by ranking and author subscriptions."""
+"""
+订阅功能使用的 Pixiv App API 客户端封装，基于 PixivPy-Async 1.2.x
+"""
 
 from __future__ import annotations
 
@@ -10,7 +12,9 @@ from pixivpy_async import AppPixivAPI
 
 
 class PixivAppClient:
-    """Small compatibility wrapper around PixivPy-Async 1.2.x."""
+    """
+    Small compatibility wrapper around PixivPy-Async 1.2.x
+    """
 
     def __init__(self, refresh_token: str, proxy: str | None = None):
         self.refresh_token = refresh_token
@@ -18,13 +22,14 @@ class PixivAppClient:
         self.access_token: str | None = None
 
     async def login(self) -> str:
-        """Refresh the OAuth token and return the new refresh token."""
+        """刷新 OAuth 凭据并返回最新 refresh token"""
         token = await self.api.login(refresh_token=self.refresh_token)
         self.access_token = getattr(self.api, "access_token", None)
         self.refresh_token = getattr(self.api, "refresh_token", self.refresh_token)
         return self.refresh_token
 
     async def _call(self, method, *args, **kwargs):
+        """调用 App API，并对临时异常进行有限次数重试"""
         last: Exception | None = None
         for attempt in range(3):
             try:
@@ -36,29 +41,37 @@ class PixivAppClient:
         raise last  # type: ignore[misc]
 
     async def user_detail(self, uid: int) -> dict[str, Any]:
+        """获取 Pixiv 用户资料"""
         return msgspec.to_builtins(await self._call(self.api.user_detail, uid))
 
     async def user_illusts(self, uid: int, kind: str) -> dict[str, Any]:
+        """获取用户的插画或漫画列表"""
         return msgspec.to_builtins(await self._call(self.api.user_illusts, uid, type=kind))
 
     async def user_novels(self, uid: int) -> dict[str, Any]:
+        """获取用户的小说列表"""
         return msgspec.to_builtins(await self._call(self.api.user_novels, uid))
 
     async def illust_ranking(self, mode: str, date: str | None = None) -> dict[str, Any]:
+        """获取指定模式的 Pixiv 日榜"""
         if date is None:
             return msgspec.to_builtins(await self._call(self.api.illust_ranking, mode=mode))
         return msgspec.to_builtins(await self._call(self.api.illust_ranking, mode=mode, date=date))
 
     async def illust_detail(self, pid: int) -> dict[str, Any]:
+        """获取插画详情"""
         return msgspec.to_builtins(await self.api.illust_detail(pid))
 
     async def ugoira_metadata(self, pid: int) -> dict[str, Any]:
+        """获取 ugoira 的 ZIP 地址和帧信息"""
         return msgspec.to_builtins(await self.api.ugoira_metadata(pid))
 
     async def novel_text(self, nid: int) -> dict[str, Any]:
+        """获取小说正文"""
         return msgspec.to_builtins(await self.api.novel_text(nid))
 
     async def close(self) -> None:
+        """关闭 App API 的网络会话"""
         session = getattr(self.api, "session", None)
         if session is not None and not session.closed:
             await session.close()

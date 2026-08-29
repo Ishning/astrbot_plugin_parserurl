@@ -1,4 +1,4 @@
-"""Pixiv 限制级静态作品的本地媒体处理。"""
+"""Pixiv R-18的作品的本地媒体处理"""
 
 from __future__ import annotations
 
@@ -13,13 +13,13 @@ from ...exception import SizeLimitException
 
 
 def _blur_radius(strength: int) -> float:
-    """将后台 30–100 的模糊程度线性映射到 Pillow 模糊半径。"""
+    """将后台 30–100 的模糊程度线性映射到 Pillow 模糊半径"""
     clamped = max(30, min(100, strength))
     return 15 + (clamped - 30) * 35 / 70
 
 
 def _blur_cover(source: Path, output: Path, blur_strength: int) -> Path:
-    """生成模糊封面，始终转换为 JPEG 以避免 PNG/RGBA 保存问题。"""
+    """生成模糊封面，始终转换为 JPEG 以避免 PNG/RGBA 保存问题"""
     with Image.open(source) as image:
         image.convert("RGB").filter(
             ImageFilter.GaussianBlur(radius=_blur_radius(blur_strength))
@@ -30,7 +30,7 @@ def _blur_cover(source: Path, output: Path, blur_strength: int) -> Path:
 
 
 def _build_pdf(sources: list[Path], output: Path) -> Path:
-    """将正文页合成为单个 PDF；调用方保证至少传入一页。"""
+    """将正文页合成为单个 PDF；调用方保证至少传入一页"""
     images: list[Image.Image] = []
     try:
         for source in sources:
@@ -46,6 +46,7 @@ def _build_pdf(sources: list[Path], output: Path) -> Path:
 async def create_blurred_cover(
     source: Path, output_dir: Path, blur_strength: int = 70
 ) -> Path:
+    """异步生成 R18 模糊封面"""
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"pixiv_r18_cover_{uuid4().hex}.jpg"
     # Pillow 的模糊和 JPEG 编码是 CPU 密集操作，放入线程避免阻塞事件循环。
@@ -55,6 +56,7 @@ async def create_blurred_cover(
 async def create_body_pdf(
     sources: list[Path], output_dir: Path, max_size_mb: int
 ) -> Path:
+    """异步将作品正文页合成为 PDF，并检查文件大小"""
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"pixiv_r18_pages_{uuid4().hex}.pdf"
     # Pillow 的 PDF 编码是 CPU 密集操作，放入线程避免阻塞事件循环。
@@ -68,7 +70,7 @@ async def create_body_pdf(
 async def create_ugoira_gif(
     archive: Path, output_dir: Path, frames: list[dict], max_size_mb: int = 5
 ) -> Path:
-    """Convert a Pixiv ugoira ZIP archive to GIF and enforce its size limit."""
+    """异步将 ugoira ZIP 转换为 GIF，并检查文件大小"""
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"pixiv_ugoira_{uuid4().hex}.gif"
 
@@ -98,5 +100,5 @@ async def create_ugoira_gif(
                 image.close()
             archive.unlink(missing_ok=True)
 
-    # ZIP 解码及 GIF 编码均可能消耗较多 CPU，放入线程避免阻塞事件循环。
+    # ZIP 解码及 GIF 编码均可能消耗较多 CPU，放入线程避免阻塞事件循环
     return await asyncio.to_thread(build)

@@ -58,18 +58,21 @@ class PixivParser(BaseParser):
             logger.error("[pixiv] 状态缓存损坏，已降级为空缓存: %s", exc)
         self.app_client: PixivAppClient | None = None
         self.sub_map: dict[int, dict[str, list[str]]] = {}
+
         for entry in getattr(self.mycfg, "sub_uids_users", None) or []:
             parts = str(entry).split("-")
             if not parts or not parts[0].isdigit():
                 continue
             uid = int(parts[0]); groups, users = self._targets(str(entry))
             self.sub_map[uid] = {"groups": groups, "users": users}
+
         refresh_token = getattr(self.mycfg, "refresh_token", None)
         app_features_enabled = (
             getattr(self.mycfg, "sub_enable", False)
             or getattr(self.mycfg, "ranking_list", False)
             or getattr(self.mycfg, "ranking_list_R18", False)
         )
+
         if app_features_enabled and not refresh_token:
             logger.warning("[pixiv] 已启用榜单或作者订阅，但未配置 refresh_token，相关任务不会启动")
         if refresh_token and app_features_enabled:
@@ -83,6 +86,7 @@ class PixivParser(BaseParser):
                 self._pixiv_tasks.append(asyncio.create_task(self._ranking_loop(), name="task_pixiv_ranking_loop"))
 
     async def _app_login(self) -> None:
+        """登录 App API，并安全写回刷新后的 refresh token"""
         try:
             new_refresh = await self.app_client.login()  # type: ignore[union-attr]
             async with self._state_lock:
@@ -99,6 +103,7 @@ class PixivParser(BaseParser):
             self._app_ready.set()
 
     async def _validate_r18_mode(self) -> None:
+        """验证账号是否支持 R18 日榜接口"""
         try:
             await self._app_ready.wait()
             await self.app_client.illust_ranking("day_r18")  # type: ignore[union-attr]
@@ -107,6 +112,7 @@ class PixivParser(BaseParser):
             logger.warning("[pixiv] day_r18 榜单不可用，请检查账号权限：%s", exc)
 
     async def _save_state(self) -> None:
+        """裁剪并原子保存 Pixiv 运行状态"""
         async with self._state_lock:
             for field in ("ranking_sent", "works_sent"):
                 values = self._state.get(field, {})
@@ -121,11 +127,13 @@ class PixivParser(BaseParser):
 
     @staticmethod
     def _app_items(payload: Any) -> list[dict[str, Any]]:
+        """将 PixivPy 响应转换为统一的作品字典列表"""
         if isinstance(payload, dict):
             values = payload.get("illusts") or payload.get("novels") or []
         else:
             values = getattr(payload, "illusts", None) or getattr(payload, "novels", None) or []
         result: list[dict[str, Any]] = []
+
         for value in values:
             if isinstance(value, dict):
                 result.append(value)
@@ -137,6 +145,7 @@ class PixivParser(BaseParser):
         return result
 
     def _app_result(self, item: dict[str, Any]):
+        """将 App API 作品转换为统一的解析结果"""
         pid = str(item.get("id") or item.get("illust_id") or item.get("novel_id") or "")
         user = item.get("user") or {}
         title = str(item.get("title") or f"Pixiv 作品 {pid}")
@@ -197,6 +206,7 @@ class PixivParser(BaseParser):
             warning = "R18作品因后台设置不予展示"
         else:
             warning = None
+
         return self.result(
             title=title,
             text=str(item.get("caption") or item.get("description") or "") or None,
@@ -214,7 +224,7 @@ class PixivParser(BaseParser):
     def _create_pixiv_image_contents(
         self, image_urls: list[str], extra: dict[str, Any] | None = None
     ) -> list[MediaContent]:
-        """创建带 Pixiv 大小限制提示的懒加载图片内容。"""
+        """创建带大小限制提示的懒加载图片内容"""
         contents: list[MediaContent] = []
         for url in image_urls:
             async def download(url: str = url) -> Path:
@@ -232,10 +242,12 @@ class PixivParser(BaseParser):
 
     @staticmethod
     def _targets(entry: str) -> tuple[list[str], list[str]]:
+        """解析订阅配置中的群聊和私聊目标"""
         parts = str(entry).split("-")
         return ([p[1:] for p in parts[1:] if p.startswith("g") and p[1:].isdigit()], [p[1:] for p in parts[1:] if p.startswith("u") and p[1:].isdigit()])
 
     async def _send_proactive(self, result, groups: list[str], users: list[str]) -> None:
+        """按 Pixiv 配置向订阅目标主动发送解析结果"""
         from ...render import Renderer
         from ...sender import MessageSender
 
@@ -247,7 +259,7 @@ class PixivParser(BaseParser):
         )
 
     def _create_media_task(self, coroutine) -> asyncio.Task[Any]:
-        """创建并登记媒体任务，确保插件关闭时可以取消未完成任务。"""
+        """创建并登记媒体任务，确保插件关闭时可以取消未完成任务"""
         if not hasattr(self, "_media_tasks"):
             # 兼容未经过完整构造函数初始化的测试/嵌入场景。
             self._media_tasks = set()
@@ -257,6 +269,7 @@ class PixivParser(BaseParser):
         return task
 
     async def _send_ranking_with_retry(self, result, groups: list[str], users: list[str], key: str) -> None:
+        """发送榜单并在失败后重试，最终记录幂等状态"""
         for attempt in range(1, 4):
             try:
                 await self._send_proactive(result, groups, users)
@@ -290,14 +303,17 @@ class PixivParser(BaseParser):
         item: dict[str, Any],
         semaphore: asyncio.Semaphore,
     ) -> tuple[list[MediaContent], bool] | None:
-        """按榜单作品粒度下载资源；失败作品由榜单聚合层跳过。"""
+        """下载单个榜单作品的预览资源"""
         restricted = int(item.get("x_restrict") or item.get("xRestrict") or 0) > 0
         if restricted and getattr(self.mycfg, "nsfw_mode", "ignore") == "ignore":
             return [], False
+
         urls = self._app_image_urls(item)
         if not urls:
             return [], False
+
         limit = self._page_limit(getattr(self.mycfg, "max_manga_pages", 3))
+
         async with semaphore:
             path: Path | None = None
             size_limited = False
@@ -353,7 +369,7 @@ class PixivParser(BaseParser):
         ranking_date: str | None,
         now: datetime,
     ):
-        """下载榜单作品并构造单个榜单聚合结果。"""
+        """下载榜单资源并构造聚合解析结果"""
         semaphore = asyncio.Semaphore(3)
         tasks = [
             asyncio.create_task(self._download_ranking_item(item, semaphore))
@@ -392,6 +408,7 @@ class PixivParser(BaseParser):
             contents.extend(result_contents)
         title = f"{now:%m月%d日}{'R-18' if mode == 'day_r18' else ''}榜单"
         pixiv_logo = Path(__file__).resolve().parents[2] / "resources" / "logos" / "pixiv.png"
+
         return self.result(
             title=title,
             text="\n".join(ranking_lines) or None,
@@ -407,6 +424,7 @@ class PixivParser(BaseParser):
         )
 
     async def _subscription_loop(self) -> None:
+        """定期检查作者的新作品并主动推送"""
         while True:
             try:
                 if self.app_client:
@@ -428,7 +446,7 @@ class PixivParser(BaseParser):
                         window = items[-10:]
                         for target in [*(f"group:{g}" for g in groups), *(f"user:{u}" for u in users)]:
                             prefix = f"{uid}:{target}:"
-                            # 首次发现目标时建立最新窗口基线，不补发历史作品。
+                            # 首次发现目标时建立最新窗口基线，不补发历史作品
                             if not any(key.startswith(prefix) for key in self._state["works_sent"]):
                                 for item in window:
                                     if item.get("id"):
@@ -465,6 +483,7 @@ class PixivParser(BaseParser):
             await asyncio.sleep(max(120, int(getattr(self.mycfg, "sub_interval", 10) or 10) * 60))
 
     async def _ranking_loop(self) -> None:
+        """按默认或订阅者指定时间发送每日榜单"""
         await self._app_ready.wait()
         while True:
             try:
@@ -515,10 +534,11 @@ class PixivParser(BaseParser):
 
     @staticmethod
     def _clean_comment(value: Any) -> str | None:
+        """清理简介中的 HTML，并保留段落换行"""
         if value is None:
             return None
         text = str(value).replace("\r\n", "\n").replace("\r", "\n")
-        # Pixiv 简介是 HTML。先保留显式换行与块级元素的分段，再移除样式标签。
+        # Pixiv 简介是 HTML。先保留显式换行与块级元素的分段，再移除样式标签
         text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
         text = re.sub(
             r"</?(?:p|div|li|h[1-6]|blockquote)[^>]*>",
@@ -535,6 +555,7 @@ class PixivParser(BaseParser):
 
     @staticmethod
     def _page_limit(value: Any) -> int:
+        """将多页作品数量限制在允许范围内"""
         try:
             return max(1, min(20, int(value)))
         except (TypeError, ValueError):
@@ -542,6 +563,7 @@ class PixivParser(BaseParser):
 
     @staticmethod
     def _image_urls(body: dict[str, Any]) -> list[str]:
+        """提取 Web Ajax 返回的作品原图地址"""
         urls: list[str] = []
         for page in body.get("metaPages") or []:
             image_urls = page.get("image_urls") or {}
@@ -555,7 +577,7 @@ class PixivParser(BaseParser):
 
     @staticmethod
     def _stats_text(body: dict[str, Any]) -> str | None:
-        """将 Pixiv 作品详情中的互动数据转换为卡片底部说明。"""
+        """将 Pixiv 作品详情中的互动数据转换为卡片底部说明"""
         fields = (
             ("viewCount", "浏览"),
             ("likeCount", "点赞"),
@@ -575,7 +597,7 @@ class PixivParser(BaseParser):
 
     @staticmethod
     def _tags(body: dict[str, Any]) -> list[str]:
-        """按作品解析的规则提取 Pixiv 标签，优先使用翻译名。"""
+        """按作品解析的规则提取 Pixiv 标签，优先使用翻译名"""
         raw_tags = body.get("tags") or {}
         tag_items = raw_tags.get("tags", []) if isinstance(raw_tags, dict) else raw_tags
         tags = [
@@ -586,7 +608,7 @@ class PixivParser(BaseParser):
         return [tag for tag in tags if tag]
 
     async def _fetch_user_avatar(self, user_id: Any) -> str | None:
-        """通过作者接口获取头像；作品详情未携带头像时使用此回退。"""
+        """通过 Web Ajax 获取作者头像，失败时返回空值"""
         if not user_id:
             return None
         try:
@@ -611,7 +633,7 @@ class PixivParser(BaseParser):
     def _create_blur_cover_pdf_contents(
         self, image_urls: list[str], extra: dict[str, Any] | None = None
     ) -> list[MediaContent]:
-        """为 R18 多页静态作品创建模糊封面及正文 PDF 下载任务。"""
+        """为 R18 多页作品创建模糊封面和正文 PDF 任务"""
         if not image_urls:
             return []
         output_dir = self.cfg.cache_dir / "pixiv_nsfw"
@@ -662,6 +684,7 @@ class PixivParser(BaseParser):
 
     @staticmethod
     def _blur_strength(value: Any) -> int:
+        """将模糊强度限制在后台配置允许的范围内"""
         try:
             return max(30, min(100, int(value)))
         except (TypeError, ValueError):
@@ -672,6 +695,7 @@ class PixivParser(BaseParser):
         r"https?://(?:www\.)?pixiv\.net/artworks/(?P<pid>\d+)(?:[/?#][^\s]*)?",
     )
     async def _parse_artwork(self, searched: re.Match[str]):
+        """解析 Pixiv 插画或漫画作品链接"""
         pid = searched.group("pid")
         artwork_url = self._artwork_url.format(pid)
         endpoint = f"https://www.pixiv.net/ajax/illust/{pid}"
@@ -772,7 +796,7 @@ class PixivParser(BaseParser):
 
     @staticmethod
     def _clean_novel_content(value: Any) -> str | None:
-        """清理 Pixiv 小说正文标记，同时保留正文换行。"""
+        """清理 Pixiv 小说正文标记，同时保留正文换行"""
         text = PixivParser._clean_comment(value)
         if not text:
             return None
@@ -789,6 +813,7 @@ class PixivParser(BaseParser):
         nsfw_mode: str,
         extra: dict[str, Any] | None = None,
     ) -> list[MediaContent]:
+        """按 NSFW 策略创建小说封面媒体任务"""
         if not cover_url or (nsfw and nsfw_mode == "ignore"):
             return []
         url = str(cover_url)
@@ -809,7 +834,7 @@ class PixivParser(BaseParser):
         return self._create_pixiv_image_contents([url], extra)
 
     async def _fetch_novel_series_total(self, series_id: Any) -> int | None:
-        """获取小说系列总话数；系列接口失败时降级为无系列总数。"""
+        """获取小说系列总话数；系列接口失败时降级为无系列总数"""
         body = await self._fetch_novel_series_detail(series_id)
         if not body or body.get("total") is None:
             return None
@@ -820,7 +845,7 @@ class PixivParser(BaseParser):
             return None
 
     async def _fetch_novel_series_detail(self, series_id: Any) -> dict[str, Any] | None:
-        """获取小说系列完整资料，供系列预览使用。"""
+        """获取小说系列完整资料，供系列预览使用"""
         if not series_id:
             return None
         try:
@@ -839,6 +864,7 @@ class PixivParser(BaseParser):
             return None
 
     async def _novel_series_text(self, body: dict[str, Any], user_id: Any) -> str | None:
+        """生成小说所属系列的概要文本"""
         series = body.get("seriesNavData")
         if not isinstance(series, dict) or not series.get("seriesId"):
             return None
@@ -866,6 +892,7 @@ class PixivParser(BaseParser):
         r"https?://(?:www\.)?pixiv\.net/novel/(?P<nid>\d+)(?:[/?#][^\s]*)?",
     )
     async def _parse_novel(self, searched: re.Match[str]):
+        """解析 Pixiv 单篇小说链接"""
         nid = searched.group("nid")
         novel_url = f"https://www.pixiv.net/novel/show.php?id={nid}"
         endpoint = f"https://www.pixiv.net/ajax/novel/{nid}"
@@ -908,7 +935,7 @@ class PixivParser(BaseParser):
             if part
         )
         text_parts = [part for part in (metadata, content) if part]
-        # 小说简介/标签与正文之间明确分隔，避免预览卡片中各段落粘连。
+        # 小说简介/标签与正文之间明确分隔，避免预览卡片中各段落粘连
         body_text = "\n\n---\n\n".join(text_parts)
         nsfw = int(body.get("xRestrict") or body.get("x_restrict") or 0) > 0
         nsfw_mode = getattr(self.mycfg, "nsfw_mode", "ignore")
@@ -930,7 +957,7 @@ class PixivParser(BaseParser):
         if nsfw and nsfw_mode == "ignore":
             contents = []
         if contents:
-            # 渲染器按“标题—图片—正文”顺序绘制，文字区首行增加分隔线。
+            # 渲染器按“标题—图片—正文”顺序绘制，文字区首行增加分隔线
             body_text = f"---\n\n{body_text}"
         return self.result(
             title=title,
@@ -947,7 +974,7 @@ class PixivParser(BaseParser):
         r"https?://(?:www\.)?pixiv\.net/novel/series/(?P<series_id>\d+)(?:[/?#][^\s]*)?",
     )
     async def _parse_novel_series(self, searched: re.Match[str]):
-        """解析小说系列入口，展示系列总话数。"""
+        """解析小说系列链接并展示章节概览"""
         series_id = searched.group("series_id")
         detail = await self._fetch_novel_series_detail(series_id)
         if detail is None:
@@ -991,6 +1018,7 @@ class PixivParser(BaseParser):
 
     @staticmethod
     def _timestamp(value: Any) -> int | None:
+        """将 Pixiv 时间字段转换为 Unix 时间戳"""
         if not value:
             return None
         try:
