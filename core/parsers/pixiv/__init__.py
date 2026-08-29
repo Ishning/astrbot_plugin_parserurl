@@ -107,7 +107,10 @@ class PixivParser(BaseParser):
                 if len(values) > 5000:
                     self._state[field] = dict(sorted(values.items(), key=lambda item: item[1])[-5000:])
             tmp = self._state_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self._state, ensure_ascii=False), encoding="utf-8")
+            tmp.write_text(
+                json.dumps(self._state, ensure_ascii=False, indent=4),
+                encoding="utf-8",
+            )
             tmp.replace(self._state_file)
 
     @staticmethod
@@ -211,6 +214,107 @@ class PixivParser(BaseParser):
                 self._state["ranking_sent"][key] = datetime.now().isoformat()
                 await self._save_state()
 
+    @staticmethod
+    def _app_image_urls(item: dict[str, Any]) -> list[str]:
+        urls: list[str] = []
+        single = (item.get("meta_single_page") or {}).get("original_image_url")
+        if single:
+            urls.append(str(single))
+        for page in item.get("meta_pages") or []:
+            original = (page.get("image_urls") or {}).get("original")
+            if original:
+                urls.append(str(original))
+        return urls
+
+    async def _download_ranking_item(
+        self,
+        item: dict[str, Any],
+        semaphore: asyncio.Semaphore,
+    ) -> list[MediaContent] | None:
+        """按榜单作品粒度下载资源；失败作品由榜单聚合层跳过。"""
+        restricted = int(item.get("x_restrict") or item.get("xRestrict") or 0) > 0
+        if restricted and getattr(self.mycfg, "nsfw_mode", "ignore") == "ignore":
+            return []
+        urls = self._app_image_urls(item)
+        if not urls:
+            return []
+        limit = self._page_limit(getattr(self.mycfg, "max_manga_pages", 3))
+        async with semaphore:
+            paths: list[Path] = []
+            for url in urls[:limit]:
+                for attempt in range(3):
+                    try:
+                        path = await self.downloader.download_img(
+                            url, headers=self.image_headers, proxy=self.proxy
+                        )
+                        paths.append(path)
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if attempt < 2:
+                            logger.warning(
+                                "[pixiv] 榜单资源下载失败，将在 2 分钟后重试（第 %s/3 次）：%s，原因：%s",
+                                attempt + 1,
+                                url,
+                                exc,
+                            )
+                            await asyncio.sleep(120)
+                        else:
+                            logger.warning("[pixiv] 榜单资源下载 3 次均失败，跳过作品：%s，原因：%s", url, exc)
+                            return None
+            if restricted and getattr(self.mycfg, "nsfw_mode", "ignore") == "blur_cover_pdf":
+                return [
+                    ImageContent(
+                        await create_blurred_cover(
+                            path,
+                            self.cfg.cache_dir / "pixiv_nsfw",
+                            self._blur_strength(getattr(self.mycfg, "nsfw_blur_strength", 70)),
+                        )
+                    )
+                    for path in paths
+                ]
+            return [ImageContent(path) for path in paths]
+
+    async def _build_ranking_result(
+        self,
+        items: list[dict[str, Any]],
+        mode: str,
+        ranking_date: str | None,
+        now: datetime,
+    ):
+        """下载榜单作品并构造单个榜单聚合结果。"""
+        semaphore = asyncio.Semaphore(3)
+        tasks = [
+            asyncio.create_task(self._download_ranking_item(item, semaphore))
+            for item in items
+        ]
+        downloaded = await asyncio.gather(*tasks, return_exceptions=True)
+        contents: list[MediaContent] = []
+        ranking_lines: list[str] = []
+        for rank, (item, result) in enumerate(zip(items, downloaded), 1):
+            if isinstance(result, BaseException):
+                logger.warning("[pixiv] 榜单作品处理失败，跳过第 %s 名：%s", rank, result)
+                continue
+            if result is None:
+                continue
+            title = str(item.get("title") or f"Pixiv 作品 {item.get('id', '')}")
+            user = item.get("user") or {}
+            username = str(user.get("name") or "未知作者")
+            restricted = int(item.get("x_restrict") or item.get("xRestrict") or 0) > 0
+            if restricted and getattr(self.mycfg, "nsfw_mode", "ignore") == "ignore":
+                ranking_lines.append(f"第{rank}名：{title}")
+            else:
+                ranking_lines.append(f"第{rank}名：{title}-{username}")
+            contents.extend(result)
+        title = f"{now:%m月%d日}{'R-18' if mode == 'day_r18' else ''}榜单"
+        return self.result(
+            title=title,
+            text="\n".join(ranking_lines) or None,
+            contents=contents,
+            extra={"ranking_date": ranking_date or str(now.date()), "ranking_mode": mode},
+        )
+
     async def _subscription_loop(self) -> None:
         while True:
             try:
@@ -289,18 +393,20 @@ class PixivParser(BaseParser):
                     for mode, enabled in (("day", getattr(self.mycfg, "ranking_list", False)), ("day_r18", getattr(self.mycfg, "ranking_list_R18", False))):
                         if not enabled:
                             continue
+                        pending_targets = []
+                        for target, parts in matched_targets:
+                            key = f"{now.date()}:{current_time}:{mode}:{target}"
+                            if key not in self._state["ranking_sent"]:
+                                pending_targets.append((target, parts, key))
+                        if not pending_targets:
+                            continue
                         ranking_payload = await self.app_client.illust_ranking(mode)
                         items = self._app_items(ranking_payload)[:max(1, min(20, int(getattr(self.mycfg, "ranking_top_n", 5) or 5)))]
                         ranking_date = ranking_payload.get("date") if isinstance(ranking_payload, dict) else None
-                        for target, parts in matched_targets:
+                        result = await self._build_ranking_result(items, mode, ranking_date, now)
+                        for target, parts, key in pending_targets:
                             groups = [parts[1]] if parts[0] == "group" else []; users = [parts[1]] if parts[0] == "user" else []
-                            for rank, item in enumerate(items, 1):
-                                key = f"{now.date()}:{mode}:{target}:{rank}"
-                                if key in self._state["ranking_sent"]:
-                                    continue
-                                result = self._app_result(item)
-                                result.extra["ranking_date"] = ranking_date or str(now.date())
-                                await self._send_ranking_with_retry(result, groups, users, key)
+                            await self._send_ranking_with_retry(result, groups, users, key)
                 elif matched_targets and self.app_client is None:
                     logger.warning("[pixiv] 榜单时间 %s 已到，但 App API 未初始化，请检查 refresh_token", current_time)
             except asyncio.CancelledError:
