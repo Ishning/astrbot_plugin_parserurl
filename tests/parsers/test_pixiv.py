@@ -52,6 +52,25 @@ async def test_ranking_retry_marks_sent_after_three_failures(monkeypatch):
     assert "failed" in parser._state["ranking_sent"]
 
 
+@pytest.mark.asyncio
+async def test_ugoira_gif_size_limit(tmp_path):
+    import zipfile
+    from PIL import Image
+    from core.parsers.pixiv.nsfw import create_ugoira_gif
+
+    source_dir = tmp_path / "frames"
+    source_dir.mkdir()
+    for index, color in enumerate(((255, 0, 0), (0, 255, 0))):
+        Image.new("RGB", (8, 8), color).save(source_dir / f"frame{index}.jpg")
+    archive = tmp_path / "ugoira.zip"
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.write(source_dir / "frame0.jpg", "frame0.jpg")
+        zipped.write(source_dir / "frame1.jpg", "frame1.jpg")
+    output = await create_ugoira_gif(archive, tmp_path / "out", [{"file": "frame0.jpg", "delay": 100}, {"file": "frame1.jpg", "delay": 100}])
+    assert output.exists()
+    assert output.suffix == ".gif"
+
+
 def test_pixiv_artwork_routes():
     for url in (
         "https://www.pixiv.net/artworks/12345",
