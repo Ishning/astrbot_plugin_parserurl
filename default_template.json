@@ -54,6 +54,7 @@
     "sub_uids_users": [],
     "platform_name": ["default"],
     "platform_botid": [],
+    "only_previewCard": false,
     "ranking_list": true,
     "ranking_list_R18": true,
     "ranking_send_times": "18:00",

@@ -721,6 +721,12 @@
                         "type": "list",
                         "default": []
                     },
+                    "only_previewCard": {
+                        "description": "主动订阅消息是否仅发送预览卡片",
+                        "hint": "开启后作者订阅和榜单订阅只发送预览卡片，不再发送后续图片、文件、GIF 或 PDF",
+                        "type": "bool",
+                        "default": false
+                    },
                     "ranking_list": {
                         "description": "发送全年龄综合日榜",
                         "type": "bool",

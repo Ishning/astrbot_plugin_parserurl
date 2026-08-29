@@ -14,8 +14,8 @@ from aiohttp import ClientError
 from astrbot.api import logger
 
 from ..base import BaseParser, handle
-from ...data import FileContent, ImageContent, MediaContent, Platform
-from ...exception import ParseException
+from ...data import Author, FileContent, ImageContent, MediaContent, Platform
+from ...exception import ParseException, SizeLimitException
 from .nsfw import create_blurred_cover, create_body_pdf, create_ugoira_gif
 from .app_client import PixivAppClient
 
@@ -42,6 +42,7 @@ class PixivParser(BaseParser):
         self.image_headers["Referer"] = "https://www.pixiv.net/"
         self._pixiv_tasks: list[asyncio.Task] = []
         self._state_lock = asyncio.Lock()
+        self._app_ready = asyncio.Event()
         self.pixiv_data_dir = Path(self.cfg.data_dir) / "pixiv"
         self.pixiv_data_dir.mkdir(parents=True, exist_ok=True)
         self._state_file = self.pixiv_data_dir / "state.json"
@@ -92,9 +93,12 @@ class PixivParser(BaseParser):
                     raise
         except Exception as exc:
             logger.warning("[pixiv] App API OAuth 刷新或凭据写回失败: %s", exc)
+        finally:
+            self._app_ready.set()
 
     async def _validate_r18_mode(self) -> None:
         try:
+            await self._app_ready.wait()
             await self.app_client.illust_ranking("day_r18")  # type: ignore[union-attr]
             logger.info("[pixiv] day_r18 榜单能力验证成功")
         except Exception as exc:
@@ -134,6 +138,15 @@ class PixivParser(BaseParser):
         pid = str(item.get("id") or item.get("illust_id") or item.get("novel_id") or "")
         user = item.get("user") or {}
         title = str(item.get("title") or f"Pixiv 作品 {pid}")
+        user_id = user.get("id") or user.get("user_id") or item.get("user_id")
+        user_name = str(user.get("name") or "未知作者")
+        author_name = f"{user_name}（{user_id}）" if user_id else user_name
+        profile_urls = user.get("profile_image_urls") or {}
+        avatar_url = (
+            profile_urls.get("medium")
+            or profile_urls.get("original")
+            or user.get("profile_image_url")
+        )
         is_novel = item.get("type") == "novel" or item.get("novel_id")
         urls: list[str] = []
         single = (item.get("meta_single_page") or {}).get("original_image_url")
@@ -144,30 +157,35 @@ class PixivParser(BaseParser):
             if original:
                 urls.append(str(original))
         limit = self._page_limit(getattr(self.mycfg, "max_manga_pages", 3))
+        extra: dict[str, Any] = {
+            "pixiv_id": pid,
+            "author_name": str(user.get("name") or "未知作者"),
+        }
+        restricted = int(item.get("x_restrict") or item.get("xRestrict") or 0) > 0
+        nsfw_mode = getattr(self.mycfg, "nsfw_mode", "ignore")
         # ``Downloader.download_img`` uses ``@auto_task`` and already returns
         # ``Task[Path]``; wrapping it in ``asyncio.create_task`` would reject
         # the task at type-check time (and needlessly double-schedule it).
-        contents: list[MediaContent] = [
-            ImageContent(
-                self.downloader.download_img(
-                    url, headers=self.image_headers, proxy=self.proxy
-                )
-            )
-            for url in urls[:limit]
-        ]
+        contents: list[MediaContent] = (
+            []
+            if restricted and nsfw_mode == "ignore"
+            else self._create_pixiv_image_contents(urls[:limit], extra)
+        )
         ugoira = item.get("_ugoira_meta")
         if isinstance(ugoira, dict) and getattr(self.mycfg, "nsfw_mode", "ignore") == "normal":
             zip_url = ugoira.get("zip_url") or ugoira.get("originalSrc") or ugoira.get("src")
             frames = ugoira.get("frames") or []
             if zip_url and frames:
                 async def build_gif() -> Path:
-                    archive = await self.downloader.download_file(str(zip_url), headers=self.image_headers, proxy=self.proxy)
+                    try:
+                        archive = await self.downloader.download_file(str(zip_url), headers=self.image_headers, proxy=self.proxy)
+                    except SizeLimitException:
+                        extra["warning"] = "图片超过资源大小限制已跳过下载，若需要请调整后台下载大小限制"
+                        raise
                     return await create_ugoira_gif(archive, self.cfg.cache_dir / "pixiv_ugoira", frames, 5)
                 contents.append(FileContent(create_task(build_gif()), name="pixiv_ugoira.gif"))
-        restricted = int(item.get("x_restrict") or item.get("xRestrict") or 0) > 0
-        nsfw_mode = getattr(self.mycfg, "nsfw_mode", "ignore")
         if restricted and nsfw_mode == "blur_cover_pdf":
-            contents = self._create_blur_cover_pdf_contents(urls[:limit])
+            contents = self._create_blur_cover_pdf_contents(urls[:limit], extra)
             warning = None
         elif restricted and nsfw_mode == "ignore":
             contents = []
@@ -177,10 +195,35 @@ class PixivParser(BaseParser):
         return self.result(
             title=title,
             text=str(item.get("caption") or item.get("description") or "") or None,
+            author=self.create_author(
+                author_name,
+                avatar_url=str(avatar_url) if avatar_url else None,
+                headers=self.image_headers,
+            ),
+            timestamp=self._timestamp(item.get("create_date") or item.get("createDate")),
             url=(f"https://www.pixiv.net/novel/show.php?id={pid}" if is_novel else f"https://www.pixiv.net/artworks/{pid}"),
             contents=contents,
-            extra={"pixiv_id": pid, "author_name": str(user.get("name") or "未知作者"), **({"warning": warning} if warning else {})},
+            extra={**extra, **({"warning": warning} if warning else {})},
         )
+
+    def _create_pixiv_image_contents(
+        self, image_urls: list[str], extra: dict[str, Any] | None = None
+    ) -> list[MediaContent]:
+        """创建带 Pixiv 大小限制提示的懒加载图片内容。"""
+        contents: list[MediaContent] = []
+        for url in image_urls:
+            async def download(url: str = url) -> Path:
+                try:
+                    return await self.downloader.download_img(
+                        url, headers=self.image_headers, proxy=self.proxy
+                    )
+                except SizeLimitException:
+                    if extra is not None:
+                        extra["warning"] = "图片超过资源大小限制已跳过下载，若需要请调整后台下载大小限制"
+                    raise
+
+            contents.append(ImageContent(create_task(download())))
+        return contents
 
     @staticmethod
     def _targets(entry: str) -> tuple[list[str], list[str]]:
@@ -195,6 +238,7 @@ class PixivParser(BaseParser):
             self.cfg.context, result, groups, users,
             getattr(self.mycfg, "platform_name", None) or ["default"],
             platform_botid=getattr(self.mycfg, "platform_botid", None),
+            only_previewCard=bool(getattr(self.mycfg, "only_previewCard", False)),
         )
 
     async def _send_ranking_with_retry(self, result, groups: list[str], users: list[str], key: str) -> None:
@@ -230,39 +274,51 @@ class PixivParser(BaseParser):
         self,
         item: dict[str, Any],
         semaphore: asyncio.Semaphore,
-    ) -> list[MediaContent] | None:
+    ) -> tuple[list[MediaContent], bool] | None:
         """按榜单作品粒度下载资源；失败作品由榜单聚合层跳过。"""
         restricted = int(item.get("x_restrict") or item.get("xRestrict") or 0) > 0
         if restricted and getattr(self.mycfg, "nsfw_mode", "ignore") == "ignore":
-            return []
+            return [], False
         urls = self._app_image_urls(item)
         if not urls:
-            return []
+            return [], False
         limit = self._page_limit(getattr(self.mycfg, "max_manga_pages", 3))
         async with semaphore:
-            paths: list[Path] = []
+            path: Path | None = None
+            size_limited = False
             for url in urls[:limit]:
                 for attempt in range(3):
                     try:
                         path = await self.downloader.download_img(
                             url, headers=self.image_headers, proxy=self.proxy
                         )
-                        paths.append(path)
                         break
                     except asyncio.CancelledError:
                         raise
+                    except SizeLimitException as exc:
+                        logger.warning(
+                            "[pixiv] 榜单资源超过 source_max_size，跳过当前图片并尝试下一张：%s，原因：%s",
+                            url,
+                            exc,
+                        )
+                        size_limited = True
+                        break
                     except Exception as exc:
                         if attempt < 2:
                             logger.warning(
-                                "[pixiv] 榜单资源下载失败，将在 2 分钟后重试（第 %s/3 次）：%s，原因：%s",
+                                "[pixiv] 榜单资源下载失败，将在 60 秒后重试（第 %s/3 次）：%s，原因：%s",
                                 attempt + 1,
                                 url,
                                 exc,
                             )
-                            await asyncio.sleep(120)
+                            await asyncio.sleep(60)
                         else:
-                            logger.warning("[pixiv] 榜单资源下载 3 次均失败，跳过作品：%s，原因：%s", url, exc)
-                            return None
+                            logger.warning("[pixiv] 榜单资源下载 3 次均失败，尝试该作品下一张图片：%s，原因：%s", url, exc)
+                if path is not None:
+                    break
+            if path is None:
+                logger.warning("[pixiv] 榜单作品所有图片均下载失败，跳过作品")
+                return ([], size_limited) if size_limited else None
             if restricted and getattr(self.mycfg, "nsfw_mode", "ignore") == "blur_cover_pdf":
                 return [
                     ImageContent(
@@ -272,9 +328,8 @@ class PixivParser(BaseParser):
                             self._blur_strength(getattr(self.mycfg, "nsfw_blur_strength", 70)),
                         )
                     )
-                    for path in paths
-                ]
-            return [ImageContent(path) for path in paths]
+                ], size_limited
+            return [ImageContent(path)], size_limited
 
     async def _build_ranking_result(
         self,
@@ -293,24 +348,45 @@ class PixivParser(BaseParser):
         contents: list[MediaContent] = []
         ranking_lines: list[str] = []
         for rank, (item, result) in enumerate(zip(items, downloaded), 1):
-            if isinstance(result, BaseException):
-                logger.warning("[pixiv] 榜单作品处理失败，跳过第 %s 名：%s", rank, result)
-                continue
-            if result is None:
-                continue
             title = str(item.get("title") or f"Pixiv 作品 {item.get('id', '')}")
             user = item.get("user") or {}
             username = str(user.get("name") or "未知作者")
             restricted = int(item.get("x_restrict") or item.get("xRestrict") or 0) > 0
-            if restricted and getattr(self.mycfg, "nsfw_mode", "ignore") == "ignore":
+            ignored = restricted and getattr(self.mycfg, "nsfw_mode", "ignore") == "ignore"
+            if isinstance(result, BaseException):
+                logger.warning("[pixiv] 榜单作品处理失败，跳过第 %s 名：%s", rank, result)
+                if not ignored:
+                    page_count = len(self._app_image_urls(item))
+                    suffix = f" 共{page_count}张" if page_count > 1 else ""
+                    ranking_lines.append(f"第{rank}名：{title} - {username}{suffix}")
+                continue
+            if result is None:
+                if not ignored:
+                    page_count = len(self._app_image_urls(item))
+                    suffix = f" 共{page_count}张" if page_count > 1 else ""
+                    ranking_lines.append(f"第{rank}名：{title} - {username}{suffix}")
+                continue
+            result_contents, size_limited = result
+            if ignored:
                 ranking_lines.append(f"第{rank}名：{title}")
             else:
-                ranking_lines.append(f"第{rank}名：{title}-{username}")
-            contents.extend(result)
+                page_count = len(self._app_image_urls(item))
+                suffix = f" 共{page_count}张" if page_count > 1 else ""
+                limit_warning = " 图片资源大小超限制，有需要请调整后台配置" if size_limited else ""
+                ranking_lines.append(f"第{rank}名：{title} - {username}{suffix}{limit_warning}")
+            contents.extend(result_contents)
         title = f"{now:%m月%d日}{'R-18' if mode == 'day_r18' else ''}榜单"
+        pixiv_logo = Path(__file__).resolve().parents[2] / "resources" / "logos" / "pixiv.png"
         return self.result(
             title=title,
             text="\n".join(ranking_lines) or None,
+            author=Author(name="Pixiv榜单", avatar=pixiv_logo),
+            timestamp=int(now.timestamp()),
+            url=(
+                "https://www.pixiv.net/ranking.php?mode=daily_r18"
+                if mode == "day_r18"
+                else "https://www.pixiv.net/ranking.php?mode=daily"
+            ),
             contents=contents,
             extra={"ranking_date": ranking_date or str(now.date()), "ranking_mode": mode},
         )
@@ -374,6 +450,7 @@ class PixivParser(BaseParser):
             await asyncio.sleep(max(120, int(getattr(self.mycfg, "sub_interval", 10) or 10) * 60))
 
     async def _ranking_loop(self) -> None:
+        await self._app_ready.wait()
         while True:
             try:
                 now = datetime.now(self.cfg.timezone)
@@ -400,10 +477,16 @@ class PixivParser(BaseParser):
                                 pending_targets.append((target, parts, key))
                         if not pending_targets:
                             continue
-                        ranking_payload = await self.app_client.illust_ranking(mode)
-                        items = self._app_items(ranking_payload)[:max(1, min(20, int(getattr(self.mycfg, "ranking_top_n", 5) or 5)))]
-                        ranking_date = ranking_payload.get("date") if isinstance(ranking_payload, dict) else None
-                        result = await self._build_ranking_result(items, mode, ranking_date, now)
+                        try:
+                            ranking_payload = await self.app_client.illust_ranking(mode)
+                            items = self._app_items(ranking_payload)[:max(1, min(20, int(getattr(self.mycfg, "ranking_top_n", 5) or 5)))]
+                            ranking_date = ranking_payload.get("date") if isinstance(ranking_payload, dict) else None
+                            result = await self._build_ranking_result(items, mode, ranking_date, now)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            logger.warning("[pixiv] 榜单 mode=%s 获取或聚合失败，本轮跳过：%s", mode, exc)
+                            continue
                         for target, parts, key in pending_targets:
                             groups = [parts[1]] if parts[0] == "group" else []; users = [parts[1]] if parts[0] == "user" else []
                             await self._send_ranking_with_retry(result, groups, users, key)
@@ -510,16 +593,23 @@ class PixivParser(BaseParser):
 
     # ---------- 作品解析 ----------
 
-    def _create_blur_cover_pdf_contents(self, image_urls: list[str]) -> list[MediaContent]:
+    def _create_blur_cover_pdf_contents(
+        self, image_urls: list[str], extra: dict[str, Any] | None = None
+    ) -> list[MediaContent]:
         """为 R18 多页静态作品创建模糊封面及正文 PDF 下载任务。"""
         if not image_urls:
             return []
         output_dir = self.cfg.cache_dir / "pixiv_nsfw"
 
         async def blur_cover() -> Path:
-            source = await self.downloader.download_img(
-                image_urls[0], headers=self.image_headers, proxy=self.proxy
-            )
+            try:
+                source = await self.downloader.download_img(
+                    image_urls[0], headers=self.image_headers, proxy=self.proxy
+                )
+            except SizeLimitException:
+                if extra is not None:
+                    extra["warning"] = "图片超过资源大小限制已跳过下载，若需要请调整后台下载大小限制"
+                raise
             return await create_blurred_cover(
                 source,
                 output_dir,
@@ -530,14 +620,19 @@ class PixivParser(BaseParser):
         if len(image_urls) > 1:
 
             async def body_pdf() -> Path:
-                sources = await gather(
-                    *[
-                        self.downloader.download_img(
-                            url, headers=self.image_headers, proxy=self.proxy
-                        )
-                        for url in image_urls[1:]
-                    ]
-                )
+                try:
+                    sources = await gather(
+                        *[
+                            self.downloader.download_img(
+                                url, headers=self.image_headers, proxy=self.proxy
+                            )
+                            for url in image_urls[1:]
+                        ]
+                    )
+                except SizeLimitException:
+                    if extra is not None:
+                        extra["warning"] = "图片超过资源大小限制已跳过下载，若需要请调整后台下载大小限制"
+                    raise
                 return await create_body_pdf(
                     sources, output_dir, self.cfg.source_max_size
                 )
@@ -629,17 +724,20 @@ class PixivParser(BaseParser):
             suffix = f"图片数量过多，超过设置限制；剩余详情请查看链接：{artwork_url}"
             text = f"{text}\n{suffix}" if text else suffix
 
+        result_extra: dict[str, Any] = {
+            **extra,
+            **({"info": stats} if (stats := self._stats_text(body)) else {}),
+        }
+
         # list 在类型系统中不协变：将图片项扩展到 ParseResult 所需的媒体基类列表。
         # 不修改 BaseParser.create_image_contents 的返回约定，避免影响其他解析器。
         contents: list[MediaContent] = (
-            self._create_blur_cover_pdf_contents(image_urls)
+            self._create_blur_cover_pdf_contents(image_urls, result_extra)
             if nsfw and nsfw_mode == "blur_cover_pdf"
             else []
         )
         if not contents:
-            contents.extend(
-                self.create_image_contents(image_urls, headers=self.image_headers)
-            )
+            contents.extend(self._create_pixiv_image_contents(image_urls, result_extra))
 
         return self.result(
             title=title,
@@ -652,7 +750,7 @@ class PixivParser(BaseParser):
             contents=contents,
             timestamp=self._timestamp(body.get("createDate")),
             url=artwork_url,
-            extra={**extra, **({"info": stats} if (stats := self._stats_text(body)) else {})},
+            extra=result_extra,
         )
 
     # ---------- 小说解析 ----------
@@ -670,7 +768,11 @@ class PixivParser(BaseParser):
         return text.strip() or None
 
     async def _create_novel_cover_contents(
-        self, cover_url: Any, nsfw: bool, nsfw_mode: str
+        self,
+        cover_url: Any,
+        nsfw: bool,
+        nsfw_mode: str,
+        extra: dict[str, Any] | None = None,
     ) -> list[MediaContent]:
         if not cover_url or (nsfw and nsfw_mode == "ignore"):
             return []
@@ -689,7 +791,7 @@ class PixivParser(BaseParser):
                 )
 
             return [ImageContent(create_task(blur_cover()))]
-        return list(self.create_image_contents([url], headers=self.image_headers))
+        return self._create_pixiv_image_contents([url], extra)
 
     async def _fetch_novel_series_total(self, series_id: Any) -> int | None:
         """获取小说系列总话数；系列接口失败时降级为无系列总数。"""
@@ -807,7 +909,9 @@ class PixivParser(BaseParser):
                 extra["info"] = f"字数 {int(count):,}"
             except (TypeError, ValueError):
                 pass
-        contents = await self._create_novel_cover_contents(body.get("coverUrl"), nsfw, nsfw_mode)
+        contents = await self._create_novel_cover_contents(
+            body.get("coverUrl"), nsfw, nsfw_mode, extra
+        )
         if nsfw and nsfw_mode == "ignore":
             contents = []
         if contents:
