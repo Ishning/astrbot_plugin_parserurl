@@ -44,6 +44,7 @@
     "enable": true,
     "use_proxy": true,
     "cookies": "",
+    "show_preview_detail": false,
     "refresh_token": "",
     "nsfw_mode": "ignore",
     "nsfw_blur_strength": 70,
