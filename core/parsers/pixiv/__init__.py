@@ -16,7 +16,7 @@ from astrbot.api import logger
 from ..base import BaseParser, handle
 from ...data import FileContent, ImageContent, MediaContent, Platform
 from ...exception import ParseException
-from .nsfw import create_blurred_cover, create_body_pdf
+from .nsfw import create_blurred_cover, create_body_pdf, create_ugoira_gif
 from .app_client import PixivAppClient
 
 
@@ -62,9 +62,18 @@ class PixivParser(BaseParser):
             uid = int(parts[0]); groups, users = self._targets(str(entry))
             self.sub_map[uid] = {"groups": groups, "users": users}
         refresh_token = getattr(self.mycfg, "refresh_token", None)
-        if refresh_token and (getattr(self.mycfg, "sub_enable", False) or getattr(self.mycfg, "ranking_list", False) or getattr(self.mycfg, "ranking_list_R18", False)):
+        app_features_enabled = (
+            getattr(self.mycfg, "sub_enable", False)
+            or getattr(self.mycfg, "ranking_list", False)
+            or getattr(self.mycfg, "ranking_list_R18", False)
+        )
+        if app_features_enabled and not refresh_token:
+            logger.warning("[pixiv] 已启用榜单或作者订阅，但未配置 refresh_token，相关任务不会启动")
+        if refresh_token and app_features_enabled:
             self.app_client = PixivAppClient(str(refresh_token), self.proxy)
             self._pixiv_tasks.append(asyncio.create_task(self._app_login(), name="task_pixiv_app_login"))
+            if getattr(self.mycfg, "ranking_list_R18", False):
+                self._pixiv_tasks.append(asyncio.create_task(self._validate_r18_mode(), name="task_pixiv_validate_day_r18"))
             if getattr(self.mycfg, "sub_enable", False):
                 self._pixiv_tasks.append(asyncio.create_task(self._subscription_loop(), name="task_pixiv_subscription_loop"))
             if getattr(self.mycfg, "ranking_list", False) or getattr(self.mycfg, "ranking_list_R18", False):
@@ -83,6 +92,13 @@ class PixivParser(BaseParser):
                     raise
         except Exception as exc:
             logger.warning("[pixiv] App API OAuth 刷新或凭据写回失败: %s", exc)
+
+    async def _validate_r18_mode(self) -> None:
+        try:
+            await self.app_client.illust_ranking("day_r18")  # type: ignore[union-attr]
+            logger.info("[pixiv] day_r18 榜单能力验证成功")
+        except Exception as exc:
+            logger.warning("[pixiv] day_r18 榜单不可用，请检查账号权限：%s", exc)
 
     async def _save_state(self) -> None:
         async with self._state_lock:
@@ -136,6 +152,15 @@ class PixivParser(BaseParser):
             )
             for url in urls[:limit]
         ]
+        ugoira = item.get("_ugoira_meta")
+        if isinstance(ugoira, dict) and getattr(self.mycfg, "nsfw_mode", "ignore") == "normal":
+            zip_url = ugoira.get("zip_url") or ugoira.get("originalSrc") or ugoira.get("src")
+            frames = ugoira.get("frames") or []
+            if zip_url and frames:
+                async def build_gif() -> Path:
+                    archive = await self.downloader.download_file(str(zip_url), headers=self.image_headers, proxy=self.proxy)
+                    return await create_ugoira_gif(archive, self.cfg.cache_dir / "pixiv_ugoira", frames, 5)
+                contents.append(FileContent(create_task(build_gif()), name="pixiv_ugoira.gif"))
         restricted = int(item.get("x_restrict") or item.get("xRestrict") or 0) > 0
         nsfw_mode = getattr(self.mycfg, "nsfw_mode", "ignore")
         if restricted and nsfw_mode == "blur_cover_pdf":
@@ -228,6 +253,12 @@ class PixivParser(BaseParser):
                                     except Exception as exc:
                                         logger.warning("[pixiv] 小说正文获取失败 %s: %s", item.get("id"), exc)
                                         continue
+                                if int(item.get("type") or 0) == 2 or item.get("illust_type") == 2:
+                                    try:
+                                        item["_ugoira_meta"] = await self.app_client.ugoira_metadata(int(item["id"]))
+                                    except Exception as exc:
+                                        logger.warning("[pixiv] ugoira 元数据获取失败 %s: %s", item.get("id"), exc)
+                                        continue
                                 target_id = target.split(":", 1)[1]
                                 await self._send_proactive(self._app_result(item), [target_id] if target.startswith("group:") else [], [target_id] if target.startswith("user:") else [])
                                 self._state["works_sent"][key] = datetime.now().isoformat()
@@ -242,20 +273,26 @@ class PixivParser(BaseParser):
         while True:
             try:
                 now = datetime.now(self.cfg.timezone)
-                if now.strftime("%H:%M") == str(getattr(self.mycfg, "ranking_send_times", "18:00") or "") and self.app_client:
-                    targets = getattr(self.mycfg, "ranking_subscriptions", None) or []
-                    configured_time = str(getattr(self.mycfg, "ranking_send_times", "18:00") or "")
+                current_time = now.strftime("%H:%M")
+                configured_time = str(getattr(self.mycfg, "ranking_send_times", "18:00") or "").strip()
+                targets = getattr(self.mycfg, "ranking_subscriptions", None) or []
+                matched_targets = []
+                for target in targets:
+                    parts = str(target).split(":")
+                    if len(parts) < 3:
+                        continue
+                    target_time = ":".join(parts[2:])
+                    if (target_time == "default" and current_time == configured_time) or target_time == current_time:
+                        matched_targets.append((target, parts))
+                if matched_targets and self.app_client:
+                    logger.info("[pixiv] 到达榜单发送时间 %s（当前时间 %s），开始获取榜单", current_time, current_time)
                     for mode, enabled in (("day", getattr(self.mycfg, "ranking_list", False)), ("day_r18", getattr(self.mycfg, "ranking_list_R18", False))):
                         if not enabled:
                             continue
                         ranking_payload = await self.app_client.illust_ranking(mode)
                         items = self._app_items(ranking_payload)[:max(1, min(20, int(getattr(self.mycfg, "ranking_top_n", 5) or 5)))]
                         ranking_date = ranking_payload.get("date") if isinstance(ranking_payload, dict) else None
-                        for target in targets:
-                            parts = str(target).split(":")
-                            target_time = ":".join(parts[2:]) if len(parts) >= 4 else (parts[2] if len(parts) == 3 else "")
-                            if len(parts) < 3 or (target_time != "default" and target_time != configured_time):
-                                continue
+                        for target, parts in matched_targets:
                             groups = [parts[1]] if parts[0] == "group" else []; users = [parts[1]] if parts[0] == "user" else []
                             for rank, item in enumerate(items, 1):
                                 key = f"{now.date()}:{mode}:{target}:{rank}"
@@ -264,6 +301,8 @@ class PixivParser(BaseParser):
                                 result = self._app_result(item)
                                 result.extra["ranking_date"] = ranking_date or str(now.date())
                                 await self._send_ranking_with_retry(result, groups, users, key)
+                elif matched_targets and self.app_client is None:
+                    logger.warning("[pixiv] 榜单时间 %s 已到，但 App API 未初始化，请检查 refresh_token", current_time)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
