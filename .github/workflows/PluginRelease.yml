@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
 
     steps:
       - name: Checkout code
@@ -22,12 +23,19 @@ jobs:
           echo "更新 metadata.yaml 版本为： ${{ github.ref_name }}"
           yq -i ".version = \"${{ github.ref_name }}\"" metadata.yaml
 
-      - name: Commit and Push Version Bump
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add metadata.yaml
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: bump version to ${{ github.ref_name }}" && git push origin HEAD:master)
+      - name: Create Version Bump Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: chore/bump-version-${{ github.ref_name }}
+          base: master
+          delete-branch: true
+          commit-message: "chore: bump version to ${{ github.ref_name }}"
+          title: "chore: bump version to ${{ github.ref_name }}"
+          body: |
+            Automatically update `metadata.yaml` to `${{ github.ref_name }}`.
+
+            This PR was created by the Plugin Release workflow.
 
       - name: Extract Latest Changelog Section
         id: changelog_reader
