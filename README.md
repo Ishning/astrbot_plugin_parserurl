@@ -84,7 +84,7 @@ pip install gppt
 gppt login --oauth --json
 ```
 命令会输出相关内容跟随步骤操作即可。复制由Open this URL in your browser (it may have been opened for you)第一步给出的网址到浏览器打开，同时打开浏览器的开发人员工具后进入该网址，选择登陆。在登陆成功后，此时可以在浏览器的开发人员工具-网络选项卡搜索如下：`callback?state=`或`pixiv://`，点开它将对应的整段内容复制到前面输出的命令里面并回车，此时会输出相关JSON信息。这时候只需要将名字为`refresh_token`的值复制到后台配置内即可。
-<img src="https://github.com/user-attachments/assets/6a63253b-31e4-46ff-8de7-b040963c4bc1 width="auto" alt="Image"/>
+<img src="https://github.com/user-attachments/assets/6a63253b-31e4-46ff-8de7-b040963c4bc1" width="auto" alt="Image"/>
 <img width="1555" height="783" alt="Image" src="https://github.com/user-attachments/assets/54fb176e-5e76-418a-a088-b9257a4f1867" />
 <img width="2886" height="505" alt="Image" src="https://github.com/user-attachments/assets/2d7d4d85-5330-44b1-b1d0-a7f23f699004" />
 
