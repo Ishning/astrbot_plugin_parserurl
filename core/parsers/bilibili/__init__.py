@@ -1289,19 +1289,24 @@ class BilibiliParser(BaseParser):
                     uid_cache_full = self._last_dynamic_cache[cache_key]
                     uid_cache_dyn = uid_cache_full["dynamics"]
 
-                    #寻找非顶置的最新动态
+                    #记录当前置顶动态，用于缓存清理时保护置顶动态
+                    pinned_dynamic_ids = set()
                     recent_items = []
+                    normal_item_count = 0
                     for item in items:
                         try:
                             is_pinned = item["modules"]["module_tag"]["text"] == "置顶"
                         except:
                             is_pinned = False
+
                         #同时去除type 为直播 DYNAMIC_TYPE_LIVE_RCMD 类型的动态
                         dyn_type = item.get("type", "")
-                        if not is_pinned and dyn_type != "DYNAMIC_TYPE_LIVE_RCMD":
+                        if dyn_type != "DYNAMIC_TYPE_LIVE_RCMD" and (is_pinned or normal_item_count < 5):
                             recent_items.append(item)
-                            if len(recent_items) >= 5:
-                                break
+                            if is_pinned:
+                                pinned_dynamic_ids.add(str(item["id_str"]))
+                            else:
+                                normal_item_count += 1
 
                     #让旧的在前面倒叙发送
                     recent_items.reverse()
@@ -1309,6 +1314,7 @@ class BilibiliParser(BaseParser):
                     #滑动窗口动态处理基于时间错非原来的动态id
                     for newest_item in recent_items:
                         dynamic_id = str(newest_item["id_str"])
+                        is_pinned = dynamic_id in pinned_dynamic_ids
                         try:
                             pub_ts = int(newest_item["modules"]["module_author"]["pub_ts"])
                         except Exception:
@@ -1329,7 +1335,7 @@ class BilibiliParser(BaseParser):
                             await self._save_cache()
                             continue
 
-                        if not is_first_init and uid_cache_dyn:
+                        if not is_first_init and uid_cache_dyn and not is_pinned:
                             try:
                                 max_cached_ts = max(
                                     [v.get("timestamp", 0) for v in uid_cache_dyn.values() if isinstance(v, dict)],
@@ -1403,9 +1409,9 @@ class BilibiliParser(BaseParser):
                         await self._save_cache()
                         await asyncio.sleep(1.0)
 
-                    #清理缓存，uid保留最多10条动态id的记录
-                    if len(uid_cache_dyn) > 10:
-                        keys = list(uid_cache_dyn.keys())
+                    #清理缓存，uid保留最多10条非置顶动态id的记录
+                    keys = [k for k in uid_cache_dyn.keys() if k not in pinned_dynamic_ids]
+                    if len(keys) > 10:
                         for k in keys[:-10]:
                             uid_cache_dyn.pop(k, None)
                         await self._save_cache()
@@ -1453,4 +1459,3 @@ class BilibiliParser(BaseParser):
             return True
 
         return False
-    
