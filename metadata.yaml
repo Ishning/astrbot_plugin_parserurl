@@ -1,5 +1,5 @@
 name: astrbot_plugin_parserurl
-display_name: 社交媒体链接自动解析插件
+display_name: 多平台链接自动解析和主动订阅平台内容发送插件
 desc: 多平台链接解析并发送内容，同时支持订阅用户有更新主动推送新内容
 help: 略
 version: v2.7.1
