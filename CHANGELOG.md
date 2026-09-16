@@ -1,7 +1,7 @@
 # 更新日志
 ## v2.7.2
 ### 更新与修复
-- 修复了使用 `/blogin` 命令登陆bilibli时未能成功获取cookies问题
+- 修复了使用 `/blogin` 命令登陆bilibli时未能成功获取cookies问题 ([Fix(bili/login): 支持Bilibli跨域二维码相应](https://github.com/Ishning/astrbot_plugin_parserURL/pull/46))
 - 修复了 bilibli 被动解析视频时候格式兼容问题
 
 ## v2.7.1
