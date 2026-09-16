@@ -977,9 +977,11 @@ class BilibiliParser(BaseParser):
             """
             使用视频流字典并返回匹配到的编码名称和该编码的得分
             """
-            codec_str = v_data.get("codecs", "")
+            codec_str = str(v_data.get("codecs", "")).lower()
             for val in VideoCodecs:
-                if val.value in codec_str:
+                codec_values = val.value if isinstance(val.value, tuple) else (val.value,)
+                codec_values = tuple(str(value).lower() for value in codec_values if value)
+                if any(codec_value in codec_str for codec_value in codec_values):
                     return val.name, codec_scores.get(val.name, 0)
             return "未知编码", 0
 
