@@ -39,6 +39,24 @@ class Image(Struct):
     # size: float
 
 
+class Album(Struct):
+    """图文动态顶部图片"""
+
+    pics: list[Image]
+
+
+class TopDisplay(Struct):
+    """图文动态顶部展示内容"""
+
+    album: Album | None = None
+
+
+class Top(Struct):
+    """图文动态顶部模块"""
+
+    display: TopDisplay | None = None
+
+
 class Pic(Struct):
     """图文动态图片组"""
 
@@ -84,6 +102,7 @@ class Module(Struct):
     module_type: str
     module_author: Author | None = None
     module_content: Content | None = None
+    module_top: Top | None = None
     # module_stat: OpusStat | None = None
 
 
@@ -132,7 +151,12 @@ class OpusItem(Struct):
     def gen_text_img(self) -> Generator[TextNode | ImageNode, None, None]:
         """生成图文节点（保持顺序）"""
         for module in self.item.modules:
-            if module.module_type == "MODULE_TYPE_CONTENT" and module.module_content:
+            if module.module_type == "MODULE_TYPE_TOP" and module.module_top:
+                display = module.module_top.display
+                if display and display.album:
+                    for pic in display.album.pics:
+                        yield ImageNode(url=pic.url)
+            elif module.module_type == "MODULE_TYPE_CONTENT" and module.module_content:
                 for paragraph in module.module_content.paragraphs:
                     # 处理文本段落
                     if paragraph.text and paragraph.text.nodes:

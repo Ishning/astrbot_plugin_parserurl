@@ -16,8 +16,8 @@ if str(plugins_dir) not in sys.path:
     sys.path.insert(0, str(plugins_dir))
 
 try:
-    from astrbot_plugin_parserURL.core.parsers.xhs import XHSParser, Video, Media, Stream
-    from astrbot_plugin_parserURL.core.parsers.base import ParseException
+    from astrbot_plugin_parserurl.core.parsers.xhs import XHSParser, Video, Media, Stream
+    from astrbot_plugin_parserurl.core.parsers.base import ParseException
 except ModuleNotFoundError:
     from core.parsers.xhs import XHSParser, Video, Media, Stream
     from core.parsers.base import ParseException
@@ -45,7 +45,7 @@ def xhs_parser(mock_config):
     """实例化XHSParser"""
     mock_downloader = MagicMock()
     # 避免 CookieJar 初始化报错或进行 IO
-    with patch('astrbot_plugin_parserURL.core.parsers.xhs.CookieJar') as MockCookieJar:
+    with patch('astrbot_plugin_parserurl.core.parsers.xhs.CookieJar') as MockCookieJar:
         mock_jar_instance = MagicMock()
         mock_jar_instance.cookies_str = "fake_cookie=123"
         MockCookieJar.return_value = mock_jar_instance
