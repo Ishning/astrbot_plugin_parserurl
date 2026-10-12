@@ -1,4 +1,5 @@
 import pytest
+from msgspec import convert
 import asyncio
 import re
 import sys
@@ -16,11 +17,13 @@ if str(plugins_dir) not in sys.path:
     sys.path.insert(0, str(plugins_dir))
 
 try:
-    from astrbot_plugin_parserURL.core.parsers.bilibili import BilibiliParser
-    from astrbot_plugin_parserURL.core.parsers.base import ParseException
+    from astrbot_plugin_parserurl.core.parsers.bilibili import BilibiliParser
+    from astrbot_plugin_parserurl.core.parsers.base import ParseException
+    from astrbot_plugin_parserurl.core.parsers.bilibili.opus import ImageNode, OpusItem, TextNode
 except ModuleNotFoundError:
     from core.parsers.bilibili import BilibiliParser
     from core.parsers.base import ParseException
+    from core.parsers.bilibili.opus import ImageNode, OpusItem, TextNode
 
 @pytest.fixture
 def mock_config(tmp_path):
@@ -94,6 +97,128 @@ async def test_check_is_article(bili_parser):
     assert await bili_parser._check_is_article(dynamic_data) == False
     assert await bili_parser._check_is_article(bad_data) == False
 
+
+@pytest.fixture
+def opus_top_info():
+    """动态 1254290227529252902 的顶部相册及正文结构。"""
+    return {
+        "item": {
+            "id_str": "1254290227529252902",
+            "type": 1,
+            "basic": {"title": "毋氓WuMeng的动态 - 哔哩哔哩", "comment_type": 11},
+            "modules": [
+                {
+                    "module_type": "MODULE_TYPE_TOP",
+                    "module_top": {
+                        "display": {
+                            "type": 1,
+                            "album": {
+                                "pics": [{
+                                    "url": "http://i0.hdslb.com/bfs/new_dyn/0be9c9e162e4786d3ca4fa782f24fb1e1670429928.png",
+                                    "width": 1080,
+                                    "height": 1440,
+                                }]
+                            },
+                            "video": None,
+                        }
+                    },
+                    "module_content": None,
+                },
+                {
+                    "module_type": "MODULE_TYPE_AUTHOR",
+                    "module_author": {
+                        "name": "毋氓WuMeng",
+                        "face": "https://example.com/avatar.jpg",
+                        "mid": 1670429928,
+                        "pub_time": "",
+                        "pub_ts": "1700000000",
+                    },
+                },
+                {
+                    "module_type": "MODULE_TYPE_CONTENT",
+                    "module_content": {
+                        "paragraphs": [{
+                            "para_type": 1,
+                            "text": {"nodes": [{
+                                "type": "TEXT_NODE_TYPE_WORD",
+                                "word": {"words": "有人要换一下吗，多出来了迷途兽景元元车厘子和球棒狸"},
+                            }]},
+                            "pic": None,
+                        }]
+                    },
+                },
+            ],
+        }
+    }
+
+
+def test_opus_top_album_and_body_order(opus_top_info):
+    """顶部多图和正文图文应按原顺序生成。"""
+    modules = opus_top_info["item"]["modules"]
+    pics = modules[0]["module_top"]["display"]["album"]["pics"]
+    pics.append({"url": "https://example.com/top2.jpg"})
+    modules[2]["module_content"]["paragraphs"].append({
+        "para_type": 2,
+        "pic": {"pics": [{"url": "https://example.com/body.jpg"}], "style": 1},
+    })
+
+    nodes = list(convert(opus_top_info, OpusItem).gen_text_img())
+
+    assert nodes == [
+        ImageNode(url=pics[0]["url"]),
+        ImageNode(url=pics[1]["url"]),
+        TextNode(text="\n\n有人要换一下吗，多出来了迷途兽景元元车厘子和球棒狸"),
+        ImageNode(url="https://example.com/body.jpg"),
+    ]
+
+
+@pytest.mark.parametrize("top", [
+    None,
+    {},
+    {"display": None},
+    {"display": {}},
+    {"display": {"album": None, "video": {"aid": 1}}},
+    {"display": {"album": {"pics": []}}},
+])
+def test_opus_top_without_album_keeps_body(opus_top_info, top):
+    """空顶部及非相册顶部不影响正文解析。"""
+    opus_top_info["item"]["modules"][0]["module_top"] = top
+    nodes = list(convert(opus_top_info, OpusItem).gen_text_img())
+    assert nodes == [TextNode(text="\n\n有人要换一下吗，多出来了迷途兽景元元车厘子和球棒狸")]
+
+
+def test_opus_without_top_keeps_body_images(opus_top_info):
+    """没有顶部模块的原有正文图片仍正常提取。"""
+    modules = opus_top_info["item"]["modules"]
+    modules.pop(0)
+    modules[1]["module_content"]["paragraphs"].insert(0, {
+        "para_type": 2,
+        "pic": {"pics": [{"url": "https://example.com/body.jpg"}], "style": 1},
+    })
+    nodes = list(convert(opus_top_info, OpusItem).gen_text_img())
+    assert nodes == [
+        ImageNode(url="https://example.com/body.jpg"),
+        TextNode(text="\n\n有人要换一下吗，多出来了迷途兽景元元车厘子和球棒狸"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parse_opus_top_image(bili_parser, opus_top_info):
+    """实际 case 的顶部图片应进入解析结果并触发下载。"""
+    opus = AsyncMock()
+    opus.get_info.return_value = opus_top_info
+
+    result = await bili_parser._parse_opus_obj(opus)
+
+    assert len(result.contents) == 1
+    assert result.text == "有人要换一下吗，多出来了迷途兽景元元车厘子和球棒狸"
+    assert result.url == "https://www.bilibili.com/opus/1254290227529252902"
+    bili_parser.downloader.download_img.assert_any_call(
+        opus_top_info["item"]["modules"][0]["module_top"]["display"]["album"]["pics"][0]["url"],
+        headers=bili_parser.headers,
+        proxy=bili_parser.proxy,
+    )
+
 # 路由匹配测试 (Regex Route Tests)
 def test_routes_matching():
     """测试相关链接是否匹配到相关的 handler 关键字"""
@@ -142,8 +267,9 @@ async def test_extract_download_urls_success(bili_parser):
         }
     }
 
-    # 使用 patch 拦截掉 bilibili_api_video 的实例化和 get_download_url
-    with patch('astrbot_plugin_parserURL.core.parsers.bilibili.Video') as MockVideo:
+    # 拦截视频接口和凭证初始化，避免测试触发真实网络请求
+    with patch('astrbot_plugin_parserurl.core.parsers.bilibili.Video') as MockVideo, \
+         patch.object(bili_parser.login, '_init_credential', new_callable=AsyncMock):
         mock_video_instance = AsyncMock()
         mock_video_instance.get_download_url.return_value = mock_dash_data
         MockVideo.return_value = mock_video_instance

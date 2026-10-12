@@ -23,11 +23,11 @@ if str(plugins_dir) not in sys.path:
 
 # 1: 替换为你要测试的实际 Parser，type: ignore 可去除
 try:
-    from astrbot_plugin_parserURL.core.parsers.YOUR_PLATFORM import YourPlatformParser # type: ignore
-    from astrbot_plugin_parserURL.core.base import ParseException # type: ignore
+    from astrbot_plugin_parserurl.core.parsers.YOUR_PLATFORM import YourPlatformParser # type: ignore
+    from astrbot_plugin_parserurl.core.parsers.base import ParseException # type: ignore
 except ModuleNotFoundError:
     from core.parsers.YOUR_PLATFORM import YourPlatformParser # type: ignore
-    from core.base import ParseException # type: ignore
+    from core.parsers.base import ParseException # type: ignore
 
 # ==========================================
 # 核心 Fixtures (提供极其干净的测试环境)
@@ -63,7 +63,7 @@ def target_parser(mock_config):
     # 拦截后台可能存在的轮询任务和 CookieJar，防止产生真实 IO
     with patch('asyncio.create_task'), \
          patch('asyncio.all_tasks', return_value=set()), \
-         patch('astrbot_plugin_parserURL.core.parsers.YOUR_PLATFORM.CookieJar') as MockCookieJar: # 3: 修改这里的拦截路径
+         patch('astrbot_plugin_parserurl.core.parsers.YOUR_PLATFORM.CookieJar') as MockCookieJar: # 3: 修改这里的拦截路径
 
         # 赋予假 Cookie 字符串
         mock_jar_instance = MagicMock()
