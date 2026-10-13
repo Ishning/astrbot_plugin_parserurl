@@ -64,9 +64,6 @@ class MessageSender:
     def _to_file_uri(self, path: Path) -> str:
         if not path.is_absolute():
             path = path.resolve()
-        posix_path = path.as_posix()
-        if posix_path.startswith("/"):
-            return f"file:////{posix_path.lstrip('/')}"
         return path.as_uri()
 
     @staticmethod
@@ -138,7 +135,7 @@ class MessageSender:
         # 取消原分开的，只要有渲染卡片就统一加入前面消息列表中
         if plan["render_card"]:
             if image_path := await self.renderer.render_card(result):
-                segs.append(Image(self._to_file_uri(image_path)))
+                segs.append(Image.fromFileSystem(str(image_path)))
 
         # 轻媒体处理
         for cont in plan["light"]:
@@ -158,10 +155,9 @@ class MessageSender:
 
             match cont:
                 case ImageContent():
-                    segs.append(Image(self._to_file_uri(path)))
+                    segs.append(Image.fromFileSystem(str(path)))
                 case GraphicsContent() as g:
-                    # OneBot/aiocqhttp 本地文件参数要求 file:// URI，而非裸本地路径。
-                    segs.append(Image(self._to_file_uri(path)))
+                    segs.append(Image.fromFileSystem(str(path)))
                     # GraphicsContent 允许携带补充文本
                     if g.text:
                         segs.append(Plain(g.text))
@@ -182,12 +178,12 @@ class MessageSender:
 
             match cont:
                 case VideoContent() | DynamicContent():
-                    segs.append(Video(self._to_file_uri(path)))
+                    segs.append(Video.fromFileSystem(str(path)))
                 case AudioContent():
                     segs.append(
                         File(name=path.name, file=self._to_file_uri(path))
                         if self.cfg.audio_to_file
-                        else Record(self._to_file_uri(path))
+                        else Record.fromFileSystem(str(path))
                     )
                 case FileContent():
                     segs.append(File(name=path.name, file=self._to_file_uri(path)))
@@ -268,7 +264,7 @@ class MessageSender:
         preview_segs = []
         if plan["render_card"]:
             if image_path := await self.renderer.render_card(result):
-                preview_segs.append(Image(self._to_file_uri(image_path)))
+                preview_segs.append(Image.fromFileSystem(str(image_path)))
         
         if text_segs:
             preview_segs.extend(text_segs)
@@ -409,7 +405,7 @@ class MessageSender:
 
         if plan["render_card"]:
             if image_path := await self.renderer.render_card(result):
-                preview_segs.append(Image(self._to_file_uri(image_path)))
+                preview_segs.append(Image.fromFileSystem(str(image_path)))
 
         text_segs = self._build_text_fallback_for_url(result)
         if text_segs:
