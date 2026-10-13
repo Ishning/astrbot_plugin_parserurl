@@ -1,4 +1,12 @@
 # 更新日志
+## v2.7.3
+### 更新与修复
+#### Bilibli 解析
+- 修复了一些动态含有顶部图片时候发送预览卡片以及多媒体资源发送时候顶部图片丢失未能正确获取的bug
+- 修复了动态链接 't.bilibili.com/xxxx' 在某些情况下可能受到风控报错code:-352 导致未能正确解析链接情况
+#### 其它
+- 优化了发送逻辑
+
 ## v2.7.2
 ### 更新与修复
 - 修复了使用 `/blogin` 命令登陆bilibli时未能成功获取cookies问题 ([Fix(bili/login): 支持Bilibli跨域二维码相应](https://github.com/Ishning/astrbot_plugin_parserURL/pull/46))
