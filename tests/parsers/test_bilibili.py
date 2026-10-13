@@ -4,7 +4,9 @@ import asyncio
 import re
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+
+from bilibili_api.exceptions import ArgsException, ResponseCodeException
 
 # 解决 ModuleNotFoundError
 current_file = Path(__file__).resolve()
@@ -69,6 +71,143 @@ def bili_parser(mock_config):
 
     return parser
 
+
+@pytest.fixture
+def mock_dynamic_request(bili_parser):
+    """隔离动态请求和登录凭证，避免回归测试访问网络"""
+    credential = MagicMock()
+
+    async def get_credential():
+        return credential
+
+    with patch.object(
+        type(bili_parser.login), "credential", new_callable=PropertyMock
+    ) as mock_credential, patch("bilibili_api.dynamic.Dynamic") as mock_dynamic, patch(
+        f"{BilibiliParser.__module__}.Opus"
+    ) as mock_opus:
+        mock_credential.side_effect = get_credential
+        dynamic = AsyncMock()
+        dynamic.is_article.return_value = False
+        mock_dynamic.return_value = dynamic
+        yield dynamic, mock_dynamic, mock_opus, credential, mock_credential
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_article", [False, True])
+async def test_parse_dynamic_normal_flow(bili_parser, mock_dynamic_request, is_article):
+    """正常动态和专栏保留原有解析分支，不触发降级"""
+    dynamic, _, mock_opus, _, _ = mock_dynamic_request
+    dynamic.is_article.return_value = is_article
+    dynamic.get_info.return_value = {"item": {}}
+    expected = MagicMock()
+    dynamic_info = MagicMock()
+
+    with patch.object(
+        bili_parser, "parse_read_with_opus", new_callable=AsyncMock, return_value=expected
+    ) as parse_article, patch.object(
+        bili_parser, "_parse_dynamic_info", new_callable=AsyncMock, return_value=expected
+    ) as parse_info, patch(
+        f"{BilibiliParser.__module__}.convert", return_value=dynamic_info
+    ):
+        result = await bili_parser.parse_dynamic(1258550832983441431)
+
+    assert result is expected
+    mock_opus.assert_not_called()
+    if is_article:
+        parse_article.assert_awaited_once_with(1258550832983441431)
+        dynamic.get_info.assert_not_awaited()
+        parse_info.assert_not_awaited()
+    else:
+        parse_article.assert_not_awaited()
+        dynamic.get_info.assert_awaited_once()
+        parse_info.assert_awaited_once_with(dynamic_info.item)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_method", ["is_article", "get_info"])
+async def test_parse_dynamic_352_opus_fallback(
+    bili_parser, mock_dynamic_request, opus_top_info, failed_method
+):
+    """-352 仅尝试一次 Opus，复用凭证并实际解析图文内容。"""
+    dynamic, mock_dynamic, mock_opus, credential, mock_credential = mock_dynamic_request
+    getattr(dynamic, failed_method).side_effect = ResponseCodeException(-352, "-352")
+    opus = AsyncMock()
+    opus.get_info.return_value = opus_top_info
+    mock_opus.return_value = opus
+
+    keyword, searched = bili_parser.search_url("https://t.bilibili.com/1258550832983441431")
+    result = await bili_parser.parse(keyword, searched)
+
+    assert len(result.contents) == 1
+    assert "有人要换一下吗" in result.text
+    mock_dynamic.assert_called_once_with(1258550832983441431, credential)
+    mock_opus.assert_called_once_with(1258550832983441431, credential)
+    mock_credential.assert_called_once()
+    opus.get_info.assert_awaited_once()
+    getattr(dynamic, failed_method).assert_awaited_once()
+    if failed_method == "is_article":
+        dynamic.get_info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_method", ["is_article", "get_info"])
+async def test_parse_dynamic_other_error_no_fallback(
+    bili_parser, mock_dynamic_request, failed_method
+):
+    """其他接口错误原样抛出，不使用 Opus 掩盖错误"""
+    dynamic, _, mock_opus, _, _ = mock_dynamic_request
+    error = ResponseCodeException(-404, "动态不存在")
+    getattr(dynamic, failed_method).side_effect = error
+
+    with pytest.raises(ResponseCodeException) as exc_info:
+        await bili_parser.parse_dynamic(1258550832983441431)
+
+    assert exc_info.value is error
+    mock_opus.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opus_error", [
+    ResponseCodeException(-352, "-352"),
+    ArgsException("传入的 opus_id 不正确"),
+    TimeoutError("请求超时"),
+])
+async def test_parse_dynamic_opus_fallback_failure(
+    bili_parser, mock_dynamic_request, opus_error
+):
+    """Opus 风控、不支持或超时均终止降级，保留异常原因。"""
+    dynamic, _, mock_opus, credential, _ = mock_dynamic_request
+    dynamic.is_article.side_effect = ResponseCodeException(-352, "-352")
+    opus = AsyncMock()
+    opus.get_info.side_effect = opus_error
+    mock_opus.return_value = opus
+
+    with pytest.raises(ParseException, match="Opus 降级解析失败") as exc_info:
+        await bili_parser.parse_dynamic(1258550832983441431)
+
+    assert exc_info.value.__cause__ is opus_error
+    mock_opus.assert_called_once_with(1258550832983441431, credential)
+    opus.get_info.assert_awaited_once()
+    dynamic.is_article.assert_awaited_once()
+    dynamic.get_info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_parse_dynamic_article_error_no_fallback(bili_parser, mock_dynamic_request):
+    """专栏已走 Opus 分支时失败，不再重复降级"""
+    dynamic, _, mock_opus, _, _ = mock_dynamic_request
+    dynamic.is_article.return_value = True
+    error = ResponseCodeException(-352, "-352")
+    with patch.object(
+        bili_parser, "parse_read_with_opus", new_callable=AsyncMock, side_effect=error
+    ) as parse_article:
+        with pytest.raises(ResponseCodeException) as exc_info:
+            await bili_parser.parse_dynamic(1258550832983441431)
+
+    assert exc_info.value is error
+    parse_article.assert_awaited_once_with(1258550832983441431)
+    mock_opus.assert_not_called()
+
 # 辅助函数逻辑测试 (Helper Logic Tests)
 def test_codec_priority_list(bili_parser):
     """测试配置读取是否正确转换为大写"""
@@ -100,7 +239,7 @@ async def test_check_is_article(bili_parser):
 
 @pytest.fixture
 def opus_top_info():
-    """动态 1254290227529252902 的顶部相册及正文结构。"""
+    """动态 1254290227529252902 的顶部相册及正文结构"""
     return {
         "item": {
             "id_str": "1254290227529252902",
