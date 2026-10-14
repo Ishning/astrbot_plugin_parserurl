@@ -4,6 +4,7 @@ from re import Match
 from typing import ClassVar
 
 from bilibili_api import request_settings, select_client
+from bilibili_api.exceptions import ResponseCodeException
 from bilibili_api.opus import Opus
 from bilibili_api.video import Video, VideoCodecs, VideoQuality
 from msgspec import convert
@@ -563,13 +564,30 @@ class BilibiliParser(BaseParser):
 
         from .dynamic import DynamicData
 
-        dynamic_ = Dynamic(dynamic_id, await self.login.credential)
+        credential = await self.login.credential
+        dynamic_ = Dynamic(dynamic_id, credential)
+
+        try:
+            is_article = await dynamic_.is_article()
+            dynamic_data = None if is_article else await dynamic_.get_info()
+        except ResponseCodeException as e:
+            if e.code != -352:
+                raise
+
+            logger.warning(f"[bili_解析] 动态 {dynamic_id} 触发风控 -352，尝试一次 Opus 降级")
+            try:
+                return await self._parse_opus_obj(Opus(dynamic_id, credential))
+            except Exception as opus_error:
+                logger.warning(f"[bili_解析] 动态 {dynamic_id} Opus 降级失败: {opus_error}")
+                raise ParseException(
+                    "B站动态接口触发风控 (-352)，Opus 降级解析失败，请稍后重试"
+                ) from opus_error
 
         #动态为专栏时候的
-        if await dynamic_.is_article():
+        if dynamic_data is None:
             return await self.parse_read_with_opus(dynamic_id)
-        
-        dynamic_info = convert(await dynamic_.get_info(), DynamicData).item
+
+        dynamic_info = convert(dynamic_data, DynamicData).item
 
         return await self._parse_dynamic_info(dynamic_info)
 
