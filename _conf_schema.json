@@ -730,13 +730,13 @@
                     "ranking_list": {
                         "description": "发送全年龄综合日榜",
                         "type": "bool",
-                        "default": true
+                        "default": false
                     },
                     "ranking_list_R18": {
                         "description": "发送 R18 综合日榜",
                         "hint": "榜单作品会遵从 R18 内容处理方式的配置进行处理",
                         "type": "bool",
-                        "default": true
+                        "default": false
                     },
                     "ranking_send_times": {
                         "description": "每日榜单发送时间",
