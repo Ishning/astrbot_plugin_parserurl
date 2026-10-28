@@ -10,7 +10,7 @@ class AuthorInfo(Struct):
     face: str
     mid: int
     pub_time: str
-    pub_ts: int
+    pub_ts: int | str  # 兼容 B 站返回字符串格式的时间戳
     # jump_url: str
     # following: bool = False
     # official_verify: dict[str, Any] | None = None
@@ -118,9 +118,12 @@ class DynamicModule(Struct):
         return self.module_author.face
 
     @property
-    def pub_ts(self) -> int:
+    def pub_ts(self) -> int | None:
         """获取发布时间戳"""
-        return self.module_author.pub_ts
+        try:
+            return int(self.module_author.pub_ts)
+        except (ValueError, TypeError):
+            return None
 
     @property
     def major_info(self) -> dict[str, Any] | None:
@@ -152,7 +155,7 @@ class DynamicInfo(Struct):
         return self.modules.author_face
 
     @property
-    def timestamp(self) -> int:
+    def timestamp(self) -> int | None:
         """获取发布时间戳"""
         return self.modules.pub_ts
 

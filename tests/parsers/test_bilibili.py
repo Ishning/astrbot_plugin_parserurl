@@ -21,10 +21,12 @@ if str(plugins_dir) not in sys.path:
 try:
     from astrbot_plugin_parserurl.core.parsers.bilibili import BilibiliParser
     from astrbot_plugin_parserurl.core.parsers.base import ParseException
+    from astrbot_plugin_parserurl.core.parsers.bilibili.dynamic import DynamicData
     from astrbot_plugin_parserurl.core.parsers.bilibili.opus import ImageNode, OpusItem, TextNode
 except ModuleNotFoundError:
     from core.parsers.bilibili import BilibiliParser
     from core.parsers.base import ParseException
+    from core.parsers.bilibili.dynamic import DynamicData
     from core.parsers.bilibili.opus import ImageNode, OpusItem, TextNode
 
 @pytest.fixture
@@ -289,6 +291,36 @@ def opus_top_info():
             ],
         }
     }
+
+
+@pytest.mark.parametrize("pub_ts, expected", [
+    (1700000000, 1700000000),
+    ("1700000000", 1700000000),
+    ("", None),
+    ("invalid", None),
+])
+def test_dynamic_pub_ts_is_converted(pub_ts, expected):
+    """普通动态应兼容两种时间戳格式，并忽略无效时间戳。"""
+    dynamic_info = {
+        "item": {
+            "id_str": "1234567",
+            "type": "DYNAMIC_TYPE_WORD",
+            "visible": True,
+            "modules": {
+                "module_author": {
+                    "name": "测试用户",
+                    "face": "https://example.com/avatar.jpg",
+                    "mid": 123,
+                    "pub_time": "刚刚",
+                    "pub_ts": pub_ts,
+                },
+            },
+        },
+    }
+
+    parsed = convert(dynamic_info, DynamicData).item
+
+    assert parsed.timestamp == expected
 
 
 def test_opus_top_album_and_body_order(opus_top_info):

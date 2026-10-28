@@ -23,6 +23,8 @@ _✨ 多链接解析器，支持订阅主动消息发送(具体支持平台查�
 
 当前支持的平台和类型：
 
+**注意**：*插件的部分平台解析模块受市场规范默认没有开启，若需要开启使用则需用户在 Astrbot 后台管理页面选择本插件的插件配置，然后找到下面**解析器-添加条目**进行添加所需要的解析模块*
+
 | 平台    | 触发的消息形态                    | 视频 | 图集 | 音频 | 订阅主动推送 |
 | ------ | ----------------------------    | ---- | --- | --- | ------  |
 | B 站    | av 号/BV 号/链接/短链/卡片/小程序  | ✅​  | ✅​  | ✅​  | ✅​     |
@@ -52,13 +54,13 @@ plugin i https://github.com/Ishning/astrbot_plugin_parserurl
 ## 🎉 指令
 ### 以下指令权限默认是ADMIN管理员，部分指令若有需要可以在AstrBot后台管理页面-插件-管理行为内进行自行的权限调整（所有人/仅管理员/仅群聊限管理员/跟随对话隔离）
 ### 全局
-| 指令 | 权限(默认) | 说明 | 别名 |
+| 指令 | 权限(默认) | 说明 | 其它 |
 | :---: | :---: | :---: | :---: |
 | **开启解析** | ADMIN | 开启当前会话的解析功能 | 可在后管理的插件-管理行为自行自定义 |
 | **关闭解析** | ADMIN | 关闭当前会话的解析功能 | 可在后管理的插件-管理行为自行自定义 |
 
 ### B站
-| 指令 | 权限(默认) | 说明 | 别名 |
+| 指令 | 权限(默认) | 说明 | 其它 |
 | :---: | :---: | :---: | :---: |
 | **blogin** | ADMIN | 扫码获取 B 站凭证 | `blogin`、`登录b站`，也可在后管理的插件-管理行为自行自定义 |
 | **订阅up** | ADMIN | 订阅B站用户并进行主动推送至相关用户动态群内 | 可在后管理的插件-管理行为自行自定义 |
@@ -68,7 +70,7 @@ plugin i https://github.com/Ishning/astrbot_plugin_parserurl
 | **查询up直播状态** | ADMIN | 查询订阅的B站用户直播状态 | 可在后管理的插件-管理行为自行自定义 |
 
 ### Pixiv
-| 指令 | 权限(默认) | 说明 | 别名 |
+| 指令 | 权限(默认) | 说明 | 其它 |
 | :---: | :---: | :---: | :---: |
 | **订阅pixiv用户** | ADMIN | 订阅Pixiv作者并主动推送相关用户等或群内 | 可在后管理的插件-管理行为自行自定义 |
 | **取消订阅pixiv用户** | ADMIN | 取消订阅Pixiv作者并主动推送相关用户等或群内 | 可在后管理的插件-管理行为自行自定义 |
@@ -84,7 +86,7 @@ plugin i https://github.com/Ishning/astrbot_plugin_parserurl
 
 浏览器打开Pixiv首页，确保你已登陆。然后打开浏览器的开发人员工具并刷新页面。切换开发人员工具选项卡至网络(Network)，查看名称为`www.pixiv.net`这条请求点击它下拉找到Cookie将其整个复制填入该后台配置`网页登录 Cookie (cookies)`
 
-<img src="https://github.com/user-attachments/assets/4b9cb848-9aa0-4cd0-8a13-2c0bdc73b12b" width="60%" alt="Image"/>
+<img src="https://github.com/Ishning/astrbot_plugin_parserurl_image/blob/main/1.png?raw=true" width="60%" alt="Image"/>
 
 2.App API Refresh Token (refresh_token):
 
@@ -94,9 +96,10 @@ pip install gppt
 gppt login --oauth --json
 ```
 命令会输出相关内容跟随步骤操作即可。复制由Open this URL in your browser (it may have been opened for you)第一步给出的网址到浏览器打开，同时打开浏览器的开发人员工具后进入该网址，选择登陆。在登陆成功后，此时可以在浏览器的开发人员工具-网络选项卡搜索如下：`callback?state=`或`pixiv://`，点开它将对应的整段内容复制到前面输出的命令里面并回车，此时会输出相关JSON信息。这时候只需要将名字为`refresh_token`的值复制到后台配置内即可。
-<img src="https://github.com/user-attachments/assets/6a63253b-31e4-46ff-8de7-b040963c4bc1" width="80%" height="auto" alt="Image"/>
-<img width="80%" height="auto" alt="Image" src="https://github.com/user-attachments/assets/54fb176e-5e76-418a-a088-b9257a4f1867" />
-<img width="80%" height="auto" alt="Image" src="https://github.com/user-attachments/assets/2d7d4d85-5330-44b1-b1d0-a7f23f699004" />
+
+<img src="https://github.com/Ishning/astrbot_plugin_parserurl_image/blob/main/4.png?raw=true" width="80%" height="auto" alt="Image"/>
+<img width="80%" height="auto" alt="Image" src="https://github.com/Ishning/astrbot_plugin_parserurl_image/blob/main/3.png?raw=true" />
+<img width="80%" height="auto" alt="Image" src="https://github.com/Ishning/astrbot_plugin_parserurl_image/blob/main/2.png?raw=true" />
 
 ---
 
