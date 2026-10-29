@@ -21,6 +21,7 @@ from ..base import (
     handle,
 )
 from .login import BilibiliLogin
+from .bangumi import parse_bangumi_episode, parse_bangumi_season
 
 from .dynamic import DynamicInfo
 
@@ -214,6 +215,24 @@ class BilibiliParser(BaseParser):
         """解析短链"""
         url = f"https://{searched.group(0)}"
         return await self.parse_with_redirect(url)
+
+    @handle(
+        "/bangumi/play/ss",
+        r"(?<![\w./-])(?:https?://)?(?:www\.)?bilibili\.com/bangumi/play/ss"
+        r"(?P<season_id>\d+)(?=$|[/?#\s，。！？、；：）)\]}>\"'])",
+    )
+    async def _parse_bangumi_season(self, searched: Match[str]):
+        """解析番剧/电影 season 元数据"""
+        return await parse_bangumi_season(self, int(searched.group("season_id")))
+
+    @handle(
+        "/bangumi/play/ep",
+        r"(?<![\w./-])(?:https?://)?(?:www\.)?bilibili\.com/bangumi/play/ep"
+        r"(?P<episode_id>\d+)(?=$|[/?#\s，。！？、；：）)\]}>\"'])",
+    )
+    async def _parse_bangumi_episode(self, searched: Match[str]):
+        """解析番剧/电影单集元数据"""
+        return await parse_bangumi_episode(self, int(searched.group("episode_id")))
 
     @handle("BV", r"^(?P<bvid>BV[0-9a-zA-Z]{10})(?:\s)?(?P<page_num>\d{1,3})?$")
     @handle(

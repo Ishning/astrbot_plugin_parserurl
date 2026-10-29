@@ -463,3 +463,315 @@ async def test_test_push_manual_no_target(bili_parser):
     result = await bili_parser._test_push_manual(match_obj)
     assert result.title == "测试中断"
     assert "未在配置中检测到任何有效的推送目标" in result.text
+
+
+@pytest.fixture
+def mock_bangumi(bili_parser):
+    """固定的模拟元数据；不包含账号、网页或播放地址。"""
+    bangumi_module = f"{BilibiliParser.__module__}.bangumi"
+    credential = MagicMock()
+
+    async def get_credential():
+        return credential
+
+    with patch.object(
+        type(bili_parser.login), "credential", new_callable=PropertyMock
+    ) as login, patch(f"{bangumi_module}.Bangumi") as factory, patch(
+        f"{bangumi_module}.User"
+    ) as user_factory, patch(f"{bangumi_module}.time", return_value=1800000000):
+        user_factory.return_value.get_user_info = AsyncMock(return_value={})
+        login.side_effect = get_credential
+        bangumi = AsyncMock()
+        factory.return_value = bangumi
+        bangumi.get_overview.return_value = {
+            "season_id": 1588,
+            "title": "测试番剧",
+            "cover": "https://example.com/season.jpg",
+            "evaluate": "<p>测试概况 &amp; 简介</p>",
+            "publish": {"pub_time": "2020-01-02 12:00:00"},
+            "total": 12,
+            "areas": [{"name": "日本"}],
+            "styles": ["奇幻", "冒险"],
+            "episodes": [{
+                "id": 6513061,
+                "title": "1",
+                "long_title": "测试单集",
+                "cover": "//example.com/episode.jpg",
+                "pub_time": 1577937600000,
+                "badge": "会员",
+            }],
+        }
+        bangumi.get_meta.return_value = {
+            "media": {"title": "测试番剧", "rating": {"score": 9.2, "count": 123}}
+        }
+        yield bangumi, factory, credential
+
+
+@pytest.mark.parametrize("kind", ["ss", "ep"])
+@pytest.mark.parametrize("suffix", ["", "/", "?from=share", "#detail", " 这部不错", "）"])
+def test_bangumi_route(kind, suffix):
+    keyword, match = BilibiliParser.search_url(
+        f"看看 https://www.bilibili.com/bangumi/play/{kind}1588{suffix}"
+    )
+    assert keyword == f"/bangumi/play/{kind}"
+    assert match.group("season_id" if kind == "ss" else "episode_id") == "1588"
+
+
+@pytest.mark.parametrize("url", [
+    "https://evilbilibili.com/bangumi/play/ss1588",
+    "https://other.bilibili.com/bangumi/play/ss1588",
+    "https://www.bilibili.com/bangumi/play/ep123abc",
+    "https://www.bilibili.com/bangumi/play/ss123.4",
+])
+def test_bangumi_invalid_route(url):
+    with pytest.raises(ParseException):
+        BilibiliParser.search_url(url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, target_id", [("ss", 1588), ("ep", 6513061)])
+async def test_bangumi_metadata_preview(bili_parser, mock_bangumi, kind, target_id):
+    bangumi, factory, credential = mock_bangumi
+    keyword, match = bili_parser.search_url(
+        f"https://www.bilibili.com/bangumi/play/{kind}{target_id}?from=share"
+    )
+    result = await bili_parser.parse(keyword, match)
+
+    factory.assert_called_once_with(
+        **{"ssid" if kind == "ss" else "epid": target_id}, credential=credential
+    )
+    assert result.title == ("测试番剧" if kind == "ss" else "测试番剧 - 测试单集")
+    assert result.url == f"https://www.bilibili.com/bangumi/play/{kind}{target_id}"
+    assert result.extra["layout"] == "bangumi"
+    assert result.text == "测试概况 & 简介"
+    assert result.timestamp == 1800000000
+    assert "评分：9.2（123 人评价）" in result.extra_info
+    assert "2020-01-02" in result.extra_info
+    assert "地区：日本" in result.extra_info
+    assert "类型：奇幻、冒险" in result.extra_info
+    assert "集数：12" in result.extra_info
+    if kind == "ep":
+        assert "分集：1" in result.extra_info
+        assert "会员" in result.extra_info
+    cover = "season.jpg" if kind == "ss" else "episode.jpg"
+    bili_parser.downloader.download_img.assert_called_once_with(
+        f"https://example.com/{cover}", headers=bili_parser.headers, proxy=None
+    )
+    assert not result.video_contents
+    assert len(result.graphics_contents) == 1
+    assert len(result.send_groups) == 1
+    assert not result.send_groups[0].contents
+    assert result.send_groups[0].render_card is True
+    bangumi.get_download_url.assert_not_called()
+    bangumi.get_episodes.assert_not_called()
+    bili_parser.downloader.download_video.assert_not_called()
+    bili_parser.downloader.download_av_and_merge.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rating", [None, {}, {"score": 9.2}, {"count": 123}])
+async def test_bangumi_missing_rating(bili_parser, mock_bangumi, rating):
+    bangumi, _, _ = mock_bangumi
+    bangumi.get_meta.return_value = {"media": {"rating": rating}}
+    keyword, match = bili_parser.search_url("https://bilibili.com/bangumi/play/ss1588")
+    result = await bili_parser.parse(keyword, match)
+    assert "评分：暂无评分" in result.extra_info
+
+
+@pytest.mark.asyncio
+async def test_bangumi_optional_meta_failure(bili_parser, mock_bangumi):
+    bangumi, _, _ = mock_bangumi
+    bangumi.get_meta.side_effect = ResponseCodeException(-404, "无评分信息")
+    keyword, match = bili_parser.search_url("https://bilibili.com/bangumi/play/ep6513061")
+    result = await bili_parser.parse(keyword, match)
+    assert result.title == "测试番剧 - 测试单集"
+    assert "暂无评分" in result.extra_info
+
+
+@pytest.mark.asyncio
+async def test_bangumi_minimal_public_metadata(bili_parser, mock_bangumi):
+    bangumi, factory, _ = mock_bangumi
+    bangumi.get_overview.return_value = {"title": "测试电影"}
+    bangumi.get_meta.return_value = {}
+
+    async def no_credential():
+        return None
+
+    with patch.object(type(bili_parser.login), "credential", new_callable=PropertyMock) as login:
+        login.side_effect = no_credential
+        keyword, match = bili_parser.search_url("https://bilibili.com/bangumi/play/ep6513061")
+        result = await bili_parser.parse(keyword, match)
+    factory.assert_called_once_with(epid=6513061, credential=None)
+    assert result.title == "测试电影"
+    assert result.text is None
+    assert result.timestamp == 1800000000
+    assert result.contents == []
+    assert result.extra_info == "评分：暂无评分"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overview", [None, {}, {"episodes": []}])
+async def test_bangumi_missing_overview(bili_parser, mock_bangumi, overview):
+    bangumi, _, _ = mock_bangumi
+    bangumi.get_overview.return_value = overview
+    keyword, match = bili_parser.search_url("https://bilibili.com/bangumi/play/ss1588")
+    with pytest.raises(ParseException, match="不存在或暂无可用元数据"):
+        await bili_parser.parse(keyword, match)
+
+
+@pytest.mark.asyncio
+async def test_bangumi_overview_error(bili_parser, mock_bangumi):
+    bangumi, _, _ = mock_bangumi
+    error = ResponseCodeException(-352, "风控")
+    bangumi.get_overview.side_effect = error
+    keyword, match = bili_parser.search_url("https://bilibili.com/bangumi/play/ss1588")
+    with pytest.raises(ParseException, match="元数据获取失败") as exc_info:
+        await bili_parser.parse(keyword, match)
+    assert exc_info.value.__cause__ is error
+    bangumi.get_meta.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, target_id", [("ss", 1588), ("ep", 6513061)])
+async def test_bangumi_upstream_uses_only_metadata_api(
+    bili_parser, mock_bangumi, kind, target_id
+):
+    """保留真实上游 Bangumi 调用链，拦截底层 API 以防间接请求播放地址。"""
+    from bilibili_api import bangumi as upstream
+
+    bangumi, factory, _ = mock_bangumi
+    overview = dict(bangumi.get_overview.return_value, media_id=1001588)
+    meta = bangumi.get_meta.return_value
+    factory.side_effect = upstream.Bangumi
+    calls = []
+
+    class MetadataApi:
+        def __init__(self, *, url, **kwargs):
+            assert url in {
+                "https://api.bilibili.com/pgc/view/web/simple/season",
+                "https://api.bilibili.com/pgc/review/user",
+            }
+            self.url = url
+
+        def update_params(self, **params):
+            calls.append((self.url, params))
+            return self
+
+        @property
+        async def result(self):
+            return meta if self.url.endswith("/review/user") else overview
+
+    with patch.object(upstream, "Api", MetadataApi), patch.object(
+        upstream.Episode, "get_download_url", new_callable=AsyncMock
+    ) as playurl, patch.object(
+        bili_parser, "extract_download_urls", new_callable=AsyncMock
+    ) as extract:
+        keyword, match = bili_parser.search_url(
+            f"https://bilibili.com/bangumi/play/{kind}{target_id}"
+        )
+        result = await bili_parser.parse(keyword, match)
+    assert "9.2" in result.extra_info
+    assert calls
+    playurl.assert_not_called()
+    extract.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bangumi_sends_preview_and_link_only(bili_parser, mock_bangumi, tmp_path):
+    import importlib
+
+    sender_module = importlib.import_module(
+        f"{BilibiliParser.__module__.rsplit('.parsers.', 1)[0]}.sender"
+    )
+    keyword, match = bili_parser.search_url("https://bilibili.com/bangumi/play/ss1588")
+    result = await bili_parser.parse(keyword, match)
+    renderer = MagicMock()
+    renderer.render_card = AsyncMock(return_value=tmp_path / "preview.png")
+    bili_parser.cfg.forward_threshold = 5
+    bili_parser.cfg.parser.bilibili.show_preview_detail = False
+    sender = sender_module.MessageSender(bili_parser.cfg, renderer)
+    event = MagicMock()
+    event.chain_result.side_effect = lambda segments: segments
+    event.send = AsyncMock()
+
+    await sender.send_parse_result(event, result)
+
+    event.send.assert_awaited_once()
+    segments = event.send.await_args.args[0]
+    assert len(segments) == 2
+    assert segments[0].__class__.__name__ == "Image"
+    assert segments[1].text == "链接: https://www.bilibili.com/bangumi/play/ss1588"
+    renderer.render_card.assert_awaited_once_with(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, target_id", [("ss", 1588), ("ep", 6513061)])
+async def test_bangumi_uploader_header(bili_parser, mock_bangumi, kind, target_id, tmp_path):
+    bangumi, _, _ = mock_bangumi
+    bangumi.get_overview.return_value["up_info"] = {
+        "uname": "测试上传方",
+        "avatar": "//example.com/avatar.jpg",
+    }
+    avatar_path = tmp_path / "avatar.jpg"
+    avatar_task = asyncio.get_running_loop().create_future()
+    avatar_task.set_result(avatar_path)
+    bili_parser.downloader.download_img.return_value = avatar_task
+    keyword, match = bili_parser.search_url(
+        f"https://bilibili.com/bangumi/play/{kind}{target_id}"
+    )
+    result = await bili_parser.parse(keyword, match)
+    assert result.author.name == "测试上传方"
+    assert result.author.avatar is not None
+    assert result.timestamp == 1800000000
+    bili_parser.downloader.download_img.assert_any_call(
+        "https://example.com/avatar.jpg", headers=bili_parser.headers, proxy=None
+    )
+
+    # 通过现有头部计算验证名字、时间进入与视频/动态相同的渲染路径。
+    import importlib
+
+    render_module = importlib.import_module(
+        f"{BilibiliParser.__module__.rsplit('.parsers.', 1)[0]}.render"
+    )
+    renderer = object.__new__(render_module.Renderer)
+    renderer.fontset = render_module.FontSet.new(renderer.DEFAULT_FONT_PATH)
+    renderer._load_and_process_avatar = AsyncMock(return_value=None)
+    with patch.object(type(result.author), "get_avatar_path", new_callable=AsyncMock):
+        header = await renderer._calculate_header_section(result, 750)
+    assert header is not None
+    assert header.name_lines == ["测试上传方"]
+    assert header.time_lines == [result.formatted_datetime()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "profile", "download"])
+async def test_bangumi_fallback_author(bili_parser, mock_bangumi, tmp_path, failure):
+    _, _, credential = mock_bangumi
+    module = f"{BilibiliParser.__module__}.bangumi"
+    avatar_path = tmp_path / "fallback.jpg"
+    avatar_task = asyncio.get_running_loop().create_future()
+    if failure == "download":
+        avatar_task.set_exception(OSError("模拟头像下载失败"))
+    else:
+        avatar_task.set_result(avatar_path)
+
+    # 封面仍是同步返回的下载任务，只有头像在解析时等待并兜底。
+    bili_parser.downloader.download_img.side_effect = (
+        lambda url, **kwargs: avatar_task if "fallback" in url else MagicMock()
+    )
+    with patch(f"{module}.User") as factory:
+        factory.return_value.get_user_info = AsyncMock(
+            return_value={"name": "不使用账号名字", "face": "//example.com/fallback.jpg"}
+        )
+        if failure == "profile":
+            factory.return_value.get_user_info.side_effect = TimeoutError()
+        keyword, match = bili_parser.search_url("https://bilibili.com/bangumi/play/ss1588")
+        result = await bili_parser.parse(keyword, match)
+
+    factory.assert_called_once_with(uid=8047632, credential=credential)
+    assert result.author is not None
+    assert result.author.name == "番剧/电影"
+    assert result.author.avatar == (avatar_path if failure is None else None)
+    assert result.timestamp == 1800000000
+    assert result.platform.name == "bilibili"
+    assert "评分：9.2" in result.extra_info
