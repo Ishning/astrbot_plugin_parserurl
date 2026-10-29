@@ -106,6 +106,7 @@ class FontSet:
     _FONT_SIZES = (
         ("name", 28),
         ("title", 30),
+        ("large_title", 36),
         ("warning", 38),
         ("text", 24),
         ("extra", 24),
@@ -115,6 +116,7 @@ class FontSet:
 
     name_font: FontInfo
     title_font: FontInfo
+    large_title_font: FontInfo
     warning_font: FontInfo
     text_font: FontInfo
     extra_font: FontInfo
@@ -155,6 +157,7 @@ class TitleSectionData(SectionData):
     """标题部分数据"""
 
     lines: list[str]
+    font: FontInfo | None = None
 
 
 @dataclass(eq=False, frozen=True, slots=True)
@@ -625,6 +628,7 @@ class Renderer:
     ) -> list[SectionData]:
         """计算各部分内容的高度和数据"""
         sections: list[SectionData] = []
+        bangumi_layout = result.extra.get("layout") == "bangumi"
 
         # 1. Header 部分
         header_section = await self._calculate_header_section(result, content_width)
@@ -632,14 +636,23 @@ class Renderer:
             sections.append(header_section)
 
         # 2. 标题部分
+        title_section = None
         if result.title:
+            title_font = (
+                self.fontset.large_title_font
+                if bangumi_layout else self.fontset.title_font
+            )
             title_lines = self._wrap_text(
                 result.title,
                 content_width,
-                self.fontset.title_font,
+                title_font,
             )
-            title_height = len(title_lines) * self.fontset.title_font.line_height
-            sections.append(TitleSectionData(height=title_height, lines=title_lines))
+            title_height = len(title_lines) * title_font.line_height
+            title_section = TitleSectionData(
+                height=title_height, lines=title_lines, font=title_font
+            )
+            if not bangumi_layout:
+                sections.append(title_section)
 
         # 3. 封面，图集，图文内容
         cover_p_resolved: Path | None = None
@@ -679,6 +692,9 @@ class Renderer:
                 )
                 if graphics_section:
                     sections.append(graphics_section)
+
+        if bangumi_layout and title_section is not None:
+            sections.append(title_section)
 
         # 5. 强调提示（位于正文之前）
         if warning := result.extra.get("warning"):
@@ -921,7 +937,7 @@ class Renderer:
                 case HeaderSectionData() as header:
                     await self._draw_header(ctx, header)
                 case TitleSectionData() as title:
-                    await self._draw_title(ctx, title.lines)
+                    await self._draw_title(ctx, title.lines, title.font)
                 case CoverSectionData() as cover:
                     self._draw_cover(ctx, cover.cover_img)
                 case WarningSectionData() as warning:
@@ -1050,13 +1066,15 @@ class Renderer:
 
         ctx.y_pos += section.height + self.SECTION_SPACING
 
-    async def _draw_title(self, ctx: RenderContext, lines: list[str]) -> None:
+    async def _draw_title(
+        self, ctx: RenderContext, lines: list[str], font: FontInfo | None = None
+    ) -> None:
         """绘制标题"""
         ctx.y_pos += await self.text(
             ctx,
             (self.PADDING, ctx.y_pos),
             lines,
-            self.fontset.title_font,
+            font or self.fontset.title_font,
             self.TEXT_COLOR,
         )
 
