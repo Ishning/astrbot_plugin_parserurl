@@ -23,7 +23,7 @@ def renderer():
     renderer._calculate_header_section = AsyncMock(
         return_value=HeaderSectionData(
             height=80, avatar=None, name_lines=["番剧/电影"],
-            time_lines=["2020-01-02"], text_height=60,
+            time_lines=["2026-10-06"], text_height=60,
         )
     )
     renderer._load_and_resize_cover = AsyncMock(return_value=None)
@@ -69,7 +69,7 @@ async def test_card_layout_and_title_font(renderer, tmp_path, layout, has_cover)
     assert len(title.lines) > 1
     assert title.height == len(title.lines) * expected_font.line_height
 
-    # 实际绘制使用与测量相同的字体，避免放大标题后重叠或截断。
+    # 实际绘制使用与测量相同的字体，避免放大标题后重叠或截断
     renderer.text = AsyncMock(return_value=title.height)
     ctx = SimpleNamespace(y_pos=100)
     await renderer._draw_title(ctx, title.lines, title.font)
