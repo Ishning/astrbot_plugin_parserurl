@@ -1,14 +1,14 @@
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache, wraps
 from io import BytesIO
+from itertools import groupby
 from pathlib import Path
 from typing import ClassVar, ParamSpec, TypeVar
 
 import aiofiles
-from apilmoji import Apilmoji, EmojiCDNSource
 from apilmoji.core import get_font_height
 from PIL import Image, ImageDraw, ImageFont
 
@@ -16,6 +16,7 @@ from astrbot.api import logger
 
 from .config import PluginConfig
 from .data import GraphicsContent, ParseResult
+from .emoji import EmojiBudget, EmojiSource, iter_text_units
 
 # 定义类型变量
 P = ParamSpec("P")
@@ -70,18 +71,18 @@ class FontInfo:
         return hash((id(self.font), self.line_height, self.cjk_width))
 
     @lru_cache(maxsize=400)
-    def get_char_width(self, char: str) -> int:
+    def get_char_width(self, char: str) -> float:
         """获取字符宽度，使用缓存优化"""
-        return int(self.font.getlength(char))
+        return self.font.getlength(char)
 
-    def get_char_width_fast(self, char: str) -> int:
+    def get_char_width_fast(self, char: str) -> float:
         """快速获取单个字符宽度"""
         if "\u4e00" <= char <= "\u9fff":
             return self.cjk_width
         else:
             return self.get_char_width(char)
 
-    def get_text_width(self, text: str) -> int:
+    def get_text_width(self, text: str) -> float:
         """计算文本宽度，使用预计算的字符宽度优化性能
 
         Args:
@@ -94,8 +95,10 @@ class FontInfo:
             return 0
 
         total_width = 0
-        for char in text:
-            total_width += self.get_char_width_fast(char)
+        for char, is_emoji in iter_text_units(text):
+            total_width += (
+                self.font.size if is_emoji else self.get_char_width_fast(char)
+            )
         return total_width
 
 
@@ -233,6 +236,8 @@ class RenderContext:
     """是否为非转发内容"""
     y_pos: int = 0
     """当前绘制位置（绘制阶段使用）"""
+    emoji_budget: EmojiBudget = field(default_factory=EmojiBudget)
+    """当前卡片（包括转发）的 emoji 获取预算"""
 
 
 class Renderer:
@@ -300,7 +305,6 @@ class Renderer:
     """转发边框色"""
 
     # 资源名称
-    _EMOJIS = "emojis"
     _RESOURCES = "resources"
     _LOGOS = "logos"
     _BUTTON_FILENAME = "media_button.png"
@@ -318,12 +322,7 @@ class Renderer:
 
     def __init__(self, config: PluginConfig):
         self.cfg = config
-        self.EMOJI_SOURCE = EmojiCDNSource(
-            base_url=self.cfg.emoji_cdn,
-            style=self.cfg.emoji_style,
-            cache_dir=self.cfg.cache_dir / self._EMOJIS,
-        )
-        """Emoji Source"""
+        self.EMOJI_SOURCE = EmojiSource(config)
 
     @classmethod
     def load_resources(cls):
@@ -363,33 +362,71 @@ class Renderer:
     async def text(
         self,
         ctx: RenderContext,
-        xy: tuple[int, int],
+        xy: tuple[float, float],
         lines: list[str],
         font: FontInfo,
         fill: Color,
     ) -> int:
-        """绘制文本"""
-        await Apilmoji.text(
-            ctx.image,
-            xy,
-            lines,
-            font.font,
-            fill=fill,
-            line_height=font.line_height,
-            source=self.EMOJI_SOURCE,
+        """绘制文本；emoji 获取失败时只保留排版宽度。"""
+        units = [list(iter_text_units(line)) for line in lines]
+        emojis = {value for line in units for value, is_emoji in line if is_emoji}
+        images = await self.EMOJI_SOURCE.fetch_images(emojis, ctx.emoji_budget)
+        await asyncio.to_thread(
+            self._draw_text_lines, ctx.image, xy, units, font, fill, images
         )
         return font.line_height * len(lines)
+
+    @staticmethod
+    def _draw_text_lines(
+        image: PILImage,
+        xy: tuple[float, float],
+        lines: list[list[tuple[str, bool]]],
+        font: FontInfo,
+        fill: Color,
+        emojis: dict[str, PILImage | None],
+    ) -> None:
+        draw = ImageDraw.Draw(image)
+        x, y = xy
+        size = font.font.size
+        y_offset = (font.line_height - size) // 2
+        resized: dict[str, PILImage] = {}
+        for line in lines:
+            current_x = x
+            for is_emoji, group in groupby(line, key=lambda unit: unit[1]):
+                if not is_emoji:
+                    text = "".join(value for value, _ in group)
+                    draw.text((current_x, y), text, font=font.font, fill=fill)
+                    current_x += font.get_text_width(text)
+                    continue
+                for value, _ in group:
+                    if emoji_image := emojis.get(value):
+                        if value not in resized:
+                            width = max(1, size - 2)
+                            height = max(
+                                1, round(width * emoji_image.height / emoji_image.width)
+                            )
+                            resized[value] = emoji_image.resize(
+                                (width, height), Image.Resampling.LANCZOS
+                            )
+                        glyph = resized[value]
+                        image.paste(
+                            glyph, (round(current_x + 1), round(y + y_offset)), glyph
+                        )
+                    current_x += size
+            y += font.line_height
 
     async def _create_card_image(
         self,
         result: ParseResult,
         not_repost: bool = True,
+        emoji_budget: EmojiBudget | None = None,
     ) -> PILImage:
         """创建卡片图片（用于递归调用）
 
         Args:
             result: 解析结果
             not_repost: 是否为非转发内容，转发内容为 False
+            emoji_budget: 与转发卡片共用的 emoji 获取预算
 
         Returns:
             PIL Image 对象
@@ -399,7 +436,8 @@ class Renderer:
         content_width = card_width - 2 * self.PADDING
 
         # 计算各部分内容的高度
-        sections = await self._calculate_sections(result, content_width)
+        emoji_budget = emoji_budget or EmojiBudget()
+        sections = await self._calculate_sections(result, content_width, emoji_budget)
 
         # 计算总高度
         card_height = sum(section.height for section in sections)
@@ -420,6 +458,7 @@ class Renderer:
             draw=ImageDraw.Draw(image),
             not_repost=not_repost,
             y_pos=self.PADDING,  # 以 padding 作为起始
+            emoji_budget=emoji_budget,
         )
         # 绘制各部分内容
         await self._draw_sections(ctx, sections)
@@ -624,7 +663,10 @@ class Renderer:
         return await asyncio.to_thread(self._sync_load_and_process_grid_image, img_path, content_width, img_count)
 
     async def _calculate_sections(
-        self, result: ParseResult, content_width: int
+        self,
+        result: ParseResult,
+        content_width: int,
+        emoji_budget: EmojiBudget | None = None,
     ) -> list[SectionData]:
         """计算各部分内容的高度和数据"""
         sections: list[SectionData] = []
@@ -726,7 +768,9 @@ class Renderer:
 
         # 7. 转发内容
         if result.repost:
-            repost_section = await self._calculate_repost_section(result.repost)
+            repost_section = await self._calculate_repost_section(
+                result.repost, emoji_budget
+            )
             if repost_section:
                 sections.append(repost_section)
 
@@ -823,9 +867,11 @@ class Renderer:
             text_height=text_height,
         )
 
-    async def _calculate_repost_section(self, repost: ParseResult) -> RepostSectionData:
+    async def _calculate_repost_section(
+        self, repost: ParseResult, emoji_budget: EmojiBudget | None = None
+    ) -> RepostSectionData:
         """计算转发内容的高度和内容（递归调用绘制方法）"""
-        repost_image = await self._create_card_image(repost, False)
+        repost_image = await self._create_card_image(repost, False, emoji_budget)
         # 缩放图片
         scaled_width = int(repost_image.width * self.REPOST_SCALE)
         scaled_height = int(repost_image.height * self.REPOST_SCALE)
@@ -1421,23 +1467,22 @@ class Renderer:
 
             current_line = ""
             current_line_width = 0
-            remaining_text = paragraph
 
-            while remaining_text:
-                next_char = remaining_text[0]
-                char_width = font_info.get_char_width_fast(next_char)
+            for next_char, is_emoji in iter_text_units(paragraph):
+                char_width = (
+                    font_info.font.size if is_emoji
+                    else font_info.get_char_width_fast(next_char)
+                )
                 # 如果当前行为空，直接添加字符
                 if not current_line:
                     current_line = next_char
                     current_line_width = char_width
-                    remaining_text = remaining_text[1:]
                     continue
 
                 # 如果是标点符号，直接添加到当前行（标点符号不应该单独成行）
-                if is_punctuation(next_char):
+                if not is_emoji and is_punctuation(next_char):
                     current_line += next_char
                     current_line_width += char_width
-                    remaining_text = remaining_text[1:]
                     continue
 
                 # 测试添加下一个字符后的宽度
@@ -1447,13 +1492,11 @@ class Renderer:
                     # 宽度合适，继续添加
                     current_line += next_char
                     current_line_width = test_width
-                    remaining_text = remaining_text[1:]
                 else:
                     # 宽度超限，需要断行
                     lines.append(current_line)
                     current_line = next_char
                     current_line_width = char_width
-                    remaining_text = remaining_text[1:]
 
             # 保存最后一行
             if current_line:
