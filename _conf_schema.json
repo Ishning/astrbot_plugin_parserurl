@@ -118,6 +118,25 @@
         "type": "string",
         "default": ""
     },
+    "parser_emoji_cdn": {
+        "description": "Emoji 图片服务地址",
+        "hint": "按列表顺序尝试，不可用时切换下一项。仅支持兼容 EmojiCDNSource 的字符接口，不支持静态图片目录。空列表仅使用缓存，未命中时 emoji 则会留空",
+        "type": "list",
+        "default": ["https://emojicdn.elk.sh", "https://emoji-cdn.mqrio.dev"]
+    },
+    "parser_emoji_style": {
+        "description": "Emoji 渲染样式",
+        "hint": "优先使用所选样式",
+        "type": "string",
+        "options": ["facebook", "apple", "google", "twitter"],
+        "default": "facebook"
+    },
+    "parser_emoji_use_proxy": {
+        "description": "Emoji 图片下载使用代理",
+        "hint": "开启后使用全局 proxy 地址；关闭时直连，与各解析器代理开关独立",
+        "type": "bool",
+        "default": false
+    },
     "clean_cron": {
         "description": "自动清理缓存的触发周期",
         "hint": "使用 Cron 表达式（分 时 日 月 周）定义。例如：“30 2 * * *” 表示每天 2:30 。留空表示禁用自动清理",
