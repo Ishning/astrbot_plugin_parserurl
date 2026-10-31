@@ -235,6 +235,9 @@ class PluginConfig(ConfigNode):
     common_timeout: int
 
     proxy: str | None
+    parser_emoji_cdn: list[str]
+    parser_emoji_style: str
+    parser_emoji_use_proxy: bool
 
     clean_cron: str
 
@@ -243,16 +246,17 @@ class PluginConfig(ConfigNode):
     _plugin_name = "astrbot_plugin_parserurl"
 
     def __init__(self, config: AstrBotConfig, context: Context):
+        config.setdefault("parser_emoji_cdn", [
+            "https://emojicdn.elk.sh", "https://emoji-cdn.mqrio.dev"
+        ])
+        config.setdefault("parser_emoji_style", "facebook")
+        config.setdefault("parser_emoji_use_proxy", False)
         super().__init__(config)
         self.context = context
         self.admins_id = self.context.get_config().get("admins_id", [])
 
-        # ---------- 内置配置 ----------
-        self.emoji_cdn = "https://cdn.jsdelivr.net/npm/emoji-datasource-facebook@14.0.0/img/facebook/64/"
-        self.emoji_style = "FACEBOOK"  # 可选：APPLE、FACEBOOK、GOOGLE、TWITTER
-
         # ---------- 派生字段 ----------
-        self.proxy = self.proxy or None
+        self.proxy = (self.proxy or "").strip() or None
         self.max_duration = self.source_max_minute * 60
         self.max_size = self.source_max_size * 1024 * 1024
 
@@ -278,6 +282,21 @@ class PluginConfig(ConfigNode):
             self.save_config()
 
         self.parser = ParserConfig(self.parsers_template)
+        self._warn_empty_proxy()
+
+    def _warn_empty_proxy(self) -> None:
+        """配置加载时统一提示，避免各解析请求重复告警"""
+        if self.proxy:
+            return
+        affected = ["emoji"] if self.parser_emoji_use_proxy else []
+        for name in self.parser.enabled_platforms():
+            if getattr(self.parser, name).use_proxy:
+                affected.append(name)
+        if affected:
+            logger.warning(
+                "全局 proxy 地址为空，以下模块已开启代理，将继续直连："
+                + "、".join(affected)
+            )
 
     @staticmethod
     def load_parser_template(file: Path) -> list[dict[str, Any]]:
