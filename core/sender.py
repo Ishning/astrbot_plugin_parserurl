@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from itertools import chain
 from pathlib import Path
 
@@ -102,7 +103,8 @@ class MessageSender:
         if render_card_override is not None:
             render_card = render_card_override
 
-        seg_count = len(light) + len(heavy) + (1 if render_card else 0)
+        # 预览卡片不计入转发阈值，仅按解析结果内容数量判断
+        seg_count = len(light) + len(heavy)
 
         force_merge = seg_count >= self.cfg.forward_threshold
         if force_merge_override is not None:
@@ -252,7 +254,8 @@ class MessageSender:
         result: ParseResult,
         group: SendGroup,
         text_segs: list[BaseMessageComponent] | None = None, #文本接收
-    ) -> bool:
+        on_completion: Callable[[], Awaitable[None]] | None = None,
+    ) -> tuple[bool, bool]:
         plan = self._build_send_plan(
             result,
             group.contents,
@@ -269,36 +272,44 @@ class MessageSender:
         if text_segs:
             preview_segs.extend(text_segs)
 
-        # 生成正文，设置 plan 里的卡片标识防止重复生成ww
-        plan["render_card"] = False
-        content_segs = await self._build_segments(result, plan)
+        sent = False
+        completion_sent = False
+        content_segs: list[BaseMessageComponent] = []
+
+        # 预览卡片或文字兜底先行发送，完成表情不等待媒体下载
+        if preview_segs:
+            try:
+                await event.send(event.chain_result(preview_segs))
+                sent = True
+                completion_sent = True
+                if on_completion:
+                    await on_completion()
+            except Exception as e:
+                seg_meta = self._collect_seg_meta(preview_segs)
+                logger.error(f"发送解析结果失败： error={e}, segments={seg_meta}")
 
         try:
-            sent = False
+            # 生成正文，设置 plan 里的卡片标识防止重复生成
+            plan["render_card"] = False
+            content_segs = await self._build_segments(result, plan)
             
             # 策略
             if plan["force_merge"]:
-                # 卡片+链接先行
-                if preview_segs:
-                    await event.send(event.chain_result(preview_segs))
-                    sent = True
-                
                 # 剩下都合并
                 if content_segs:
                     merged_nodes = self._merge_segments_if_needed(event, content_segs, True)
                     await event.send(event.chain_result(merged_nodes))
                     sent = True
                     
-                return sent
+                return sent, completion_sent
 
             # 4. 未触发以上的策略
-            all_segs = preview_segs + content_segs
-            if not all_segs:
-                return False
+            if not content_segs:
+                return sent, completion_sent
                 
             normal_segs = []
             heavy_segs = []
-            for seg in all_segs:
+            for seg in content_segs:
                 if isinstance(seg, (Video, File, Record)):
                     heavy_segs.append(seg)
                 else:
@@ -313,12 +324,12 @@ class MessageSender:
                     await event.send(event.chain_result([heavy_seg]))
                     sent = True
 
-            return sent
+            return sent, completion_sent
 
         except Exception as e:
             seg_meta = self._collect_seg_meta(preview_segs + content_segs)
             logger.error(f"发送解析结果失败： error={e}, segments={seg_meta}")
-            return False
+            return sent, completion_sent
 
     @staticmethod
     def _collect_seg_meta(segs: list[BaseMessageComponent]) -> list[dict[str, str]]:
@@ -340,7 +351,8 @@ class MessageSender:
         self,
         event: AstrMessageEvent,
         result: ParseResult,
-    ):
+        on_completion: Callable[[], Awaitable[None]] | None = None,
+    ) -> bool:
         """
         发送解析结果的统一入口
 
@@ -363,23 +375,42 @@ class MessageSender:
             segs = self._build_text_fallback_for_url(result)
 
         sent = False
+        completion_sent = False
+        completion_notified = False
+
+        async def notify_completion():
+            nonlocal completion_notified
+            if completion_notified:
+                return
+            completion_notified = True
+            if on_completion:
+                await on_completion()
+
         for i, group in enumerate(groups):
             # 防止如果有多个 group 时重复发送文本，这里仅在最后一个 group 附带文字
             current_text_segs = segs if i == len(groups) - 1 else None
-            sent = await self._send_group(event, result, group, current_text_segs) or sent 
+            group_sent, group_completion_sent = await self._send_group(
+                event, result, group, current_text_segs, notify_completion
+            )
+            sent = group_sent or sent
+            completion_sent = group_completion_sent or completion_sent
 
         platform_name = result.platform.display_name
 
         if not sent:
             if not segs:
                 logger.warning(f"[{platform_name}] 平台发送结果为空，不执行发送")
-                return
+                return False
             try:
                 await event.send(event.chain_result(segs))
+                completion_sent = True
+                await notify_completion()
             except Exception as e:
                 seg_meta = self._collect_seg_meta(segs)
                 logger.error(f"发送解析结果失败： error={e}, segments={seg_meta}")
-                return
+                return False
+
+        return completion_sent
 
     async def send_proactive_msg(
         self,

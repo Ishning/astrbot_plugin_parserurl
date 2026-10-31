@@ -28,7 +28,7 @@ _✨ 多链接解析器，支持订阅主动消息发送(具体支持平台查�
 | 平台    | 触发的消息形态                    | 视频 | 图集 | 音频 | 订阅主动推送 |
 | ------ | ----------------------------    | ---- | --- | --- | ------  |
 | B 站    | av 号/BV 号/链接/短链/卡片/小程序，其中b站的番剧/电影版块内容解析因版权不会进行视频下载仅发送解析的预览卡片  | ✅​  | ✅​  | ✅​  | ✅​     |
-| Pixiv   | 链接(作品/小说)                  | ✅​  | ✅​  | ✅​  | ✅​     |
+| Pixiv   | 链接(作品/小说)，R-18相关解析默认关闭若需要开启则要手动打开相关开关并填入相关refresh_token 才会启用(详见下面Pixiv相关说明)，开启使用时请勿随意传播R-18内容 | ✅​  | ✅​  | ✅​  | ✅​     |
 | 抖音    | 链接(短视频/直播，支持分析短链接/PC网页链接)      | ✅​  | ✅​  | ❌️  |❌️      |
 | 微博    | 链接(博文，视频，show, 文章)       | ✅​  | ✅​  | ❌️  |❌️      |
 | 小红书  | 链接(含短链)/卡片                 | ✅​  | ✅​  | ❌️  |❌️      |
@@ -103,6 +103,19 @@ gppt login --oauth --json
 
 ---
 
+## ⚙️ 配置
+
+### Emoji 配置相关
+
+- `parser_emoji_cdn`：有序图片服务地址列表，默认使用 `https://emojicdn.elk.sh` 和 `https://emoji-cdn.mqrio.dev`。仅支持 `{地址}/{emoji字符}?style={样式}` 的地址接口，不支持直接填写 jsDelivr 静态图片目录
+- `parser_emoji_style`：首选样式，可选 `facebook`、`apple`、`google`、`twitter`。可选自己喜欢的，支持混合风格
+
+图片请求由 AstrBot 服务器发起。缓存复用插件数据目录的 `cache/emojis/`，跟随全局自动清理。图片全部获取失败时 emoji 留空并保留原宽度；地址列表为空时只使用缓存。B 站专属表情如 `[doge]` 仍按文字显示。
+
+剩余其它请在astrbot的插件配置面板查看并修改
+
+---
+
 ## 🎨 效果图
 
 插件默认启用 PIL 实现的通用媒体卡片渲染，效果图如下
@@ -116,12 +129,6 @@ gppt login --oauth --json
 <img src="https://raw.githubusercontent.com/fllesser/nonebot-plugin-parser/refs/heads/resources/resources/renderdamine/repost_2_pic.png" width="160" />
 
 </div>
-
----
-
-## ⚙️ 配置
-
-请在astrbot的插件配置面板查看并修改
 
 ---
 

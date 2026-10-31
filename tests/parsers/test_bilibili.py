@@ -694,8 +694,9 @@ async def test_bangumi_sends_preview_and_link_only(bili_parser, mock_bangumi, tm
     event.chain_result.side_effect = lambda segments: segments
     event.send = AsyncMock()
 
-    await sender.send_parse_result(event, result)
+    completed = await sender.send_parse_result(event, result)
 
+    assert completed is True
     event.send.assert_awaited_once()
     segments = event.send.await_args.args[0]
     assert len(segments) == 2

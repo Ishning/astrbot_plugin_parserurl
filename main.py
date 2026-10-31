@@ -27,6 +27,10 @@ from .core.utils import extract_json_url
 
 
 class ParserPlugin(Star):
+    _RESOLVING_EMOJI_ID = 424
+    _DONE_EMOJI_ID = 144
+    _STATUS_EMOJI_TYPE = "1"
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.cfg = PluginConfig(config, context=context)
@@ -115,6 +119,25 @@ class ParserPlugin(Star):
                 return parser
         raise ValueError(f"未找到类型为 {parser_type} 的 parser 实例")
 
+    async def _set_status_emoji(
+        self,
+        event: AiocqhttpMessageEvent,
+        message_id: int,
+        emoji_id: int,
+    ):
+        """给 QQ 群原消息添加解析状态表情"""
+        try:
+            await event.bot.set_msg_emoji_like(
+                message_id=message_id,
+                emoji_id=emoji_id,
+                emoji_type=self._STATUS_EMOJI_TYPE,
+                set=True,
+            )
+        except Exception as e:
+            logger.warning(
+                f"[状态表情] 添加表情失败 (Message ID: {message_id}, Emoji ID: {emoji_id}): {e}"
+            )
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """消息的统一入口"""
@@ -164,6 +187,7 @@ class ParserPlugin(Star):
         logger.debug(f"匹配结果: {keyword}, {searched}")
 
         # 仲裁机制
+        qq_group_message_id: int | None = None
         if isinstance(event, AiocqhttpMessageEvent) and not event.is_private_chat():
             raw = event.message_obj.raw_message
             if not isinstance(raw, dict):
@@ -177,6 +201,8 @@ class ParserPlugin(Star):
             except (KeyError, ValueError, TypeError) as e:
                 logger.warning(f"获取仲裁所需字段失败。错误信息: {e}, raw_message: {raw}")
                 return
+
+            qq_group_message_id = msg_id
 
             is_win = await self.arbiter.compete(
                 bot=event.bot,
@@ -197,6 +223,13 @@ class ParserPlugin(Star):
             logger.warning(f"[链接防抖] 链接 {link} 在防抖时间内，跳过解析")
             return
 
+        if qq_group_message_id is not None:
+            await self._set_status_emoji(
+                event,
+                qq_group_message_id,
+                self._RESOLVING_EMOJI_ID,
+            )
+
         # 解析
         parse_res = await self.parser_map[keyword].parse(keyword, searched)
 
@@ -207,7 +240,18 @@ class ParserPlugin(Star):
             return
 
         # 发送
-        await self.sender.send_parse_result(event, parse_res)
+        on_completion = None
+        if qq_group_message_id is not None:
+            on_completion = lambda: self._set_status_emoji(
+                event,
+                qq_group_message_id,
+                self._DONE_EMOJI_ID,
+            )
+        await self.sender.send_parse_result(
+            event,
+            parse_res,
+            on_completion=on_completion,
+        )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("开启解析")
