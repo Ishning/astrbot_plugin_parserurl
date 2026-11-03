@@ -678,7 +678,7 @@
                     },
                     "nsfw_mode": {
                         "description": "R18 内容处理方式",
-                        "hint": "R18 与 R18G 作品发送方式",
+                        "hint": "R18 与 R18G 作品发送方式，默认关闭且没有相关Cookie/Token时将拒绝解析发送",
                         "type": "string",
                         "options": ["normal", "blur_cover_pdf", "ignore"],
                         "labels": ["正常发送", "模糊封面并以 PDF 发送正文", "忽略媒体，仅发送文本预览"],
@@ -753,7 +753,7 @@
                     },
                     "ranking_list_R18": {
                         "description": "发送 R18 综合日榜",
-                        "hint": "榜单作品会遵从 R18 内容处理方式的配置进行处理",
+                        "hint": "榜单作品会遵从 R18 内容处理方式的配置进行处理，默认关闭且没有相关Cookie/Token时将拒绝解析发送",
                         "type": "bool",
                         "default": false
                     },
